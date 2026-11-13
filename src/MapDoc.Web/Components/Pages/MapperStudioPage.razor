@@ -1,0 +1,1617 @@
+@page "/mappings/{MappingId:guid}"
+@inject CatalogService Catalog
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+<PageTitle>@(_mapping?.Name ?? "Mapper Studio") — MapDoc</PageTitle>
+
+@if (_loading)
+{
+    <div class="page-wrap">
+        <div class="card">Loading transformation studio...</div>
+    </div>
+}
+else if (_mapping is null)
+{
+    <div class="page-wrap">
+        <div class="card">
+            <h2 style="margin:0 0 8px;">Mapping Not Found</h2>
+            <a href="/mappings" class="btn btn-primary">← Back to Mappings</a>
+        </div>
+    </div>
+}
+else
+{
+    <div class="studio-root">
+        <!-- TOP STUDIO TOOLBAR -->
+        <div class="studio-toolbar">
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <a href="/mappings" class="btn btn-xs" title="Back to Mappings list">← Mappings</a>
+
+                @if (!string.IsNullOrWhiteSpace(_mapping.Namespace))
+                {
+                    <span class="pill pill-ns">@_mapping.Namespace</span>
+                }
+                <strong style="font-size:14.5px;">@_mapping.Name</strong>
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _showSettingsModal = true" title="Edit mapping name, namespace, description, or base types">⚙ Settings</button>
+
+                <span style="color:var(--border-strong);">|</span>
+
+                <a href="/types/@_mapping.SourceTypeId" class="pill pill-Object" title="Open Source Type definition">
+                    @(_sourceType?.QualifiedName ?? "Source")
+                </a>
+                <span style="color:var(--text-muted); font-size:11px;">──▶</span>
+                <a href="/types/@_mapping.TargetTypeId" class="pill pill-Object" title="Open Target Type definition">
+                    @(_targetType?.QualifiedName ?? "Target")
+                </a>
+            </div>
+
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <button type="button" class="btn btn-xs @(_showToolbox ? "btn-primary" : "")" @onclick="ToggleToolbox">
+                    Toolbox
+                </button>
+
+                <button type="button" class="btn btn-xs" @onclick="AutoArrangeFunctoidsAsync" title="Neatly stack functoids vertically on this grid page">
+                    Auto-Layout
+                </button>
+
+                <button type="button" class="btn btn-xs" @onclick="OpenExportModal">
+                    Export Spec
+                </button>
+
+                <button type="button"
+                        class="status-pill @(_report.ErrorCount > 0 ? "status-err" : _report.WarningCount > 0 ? "status-warn" : "status-ok")"
+                        style="border:none; cursor:pointer;"
+                        @onclick="() => { _showBottomDock = !_showBottomDock; _bottomTab = BottomTab.Diagnostics; }">
+                    @if (_report.ErrorCount > 0)
+                    {
+                        <span>✕ @_report.ErrorCount Error(s) · @_report.WarningCount Warn</span>
+                    }
+                    else if (_report.WarningCount > 0)
+                    {
+                        <span>⚠ @_report.WarningCount Warning(s)</span>
+                    }
+                    else
+                    {
+                        <span>✓ Valid</span>
+                    }
+                </button>
+
+                <span style="font-size:11.5px; color:var(--text-muted);">@_saveStatusText</span>
+            </div>
+        </div>
+
+        <!-- BIZTALK GRID PAGE TABS BAR -->
+        <div class="studio-pagebar">
+            <div class="page-tabs">
+                @foreach (var pageItem in _mapping.GridPages.OrderBy(p => p.SortOrder))
+                {
+                    var isAct = _activePage?.Id == pageItem.Id;
+                    <button type="button"
+                            class="page-tab @(isAct ? "active" : "")"
+                            @onclick="() => SwitchGridPage(pageItem)">
+                        <span>@pageItem.Name</span>
+                        <span style="font-size:10.5px; opacity:0.7;">(@pageItem.Links.Count)</span>
+                    </button>
+                }
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="AddGridPageAsync" title="Add a new BizTalk-style Grid Page tab">+ Page</button>
+            </div>
+
+            @if (_activePage is not null)
+            {
+                <div style="display:flex; align-items:center; gap:6px;">
+                    @if (_renamingPage)
+                    {
+                        <input class="input input-sm" style="width:150px; height:24px;" @bind="_renamePageBuffer" />
+                        <button type="button" class="btn btn-xs btn-primary" @onclick="CommitRenamePageAsync">OK</button>
+                        <button type="button" class="btn btn-xs" @onclick="() => _renamingPage = false">Cancel</button>
+                    }
+                    else
+                    {
+                        <button type="button" class="btn btn-xs btn-ghost" @onclick="StartRenamePage">Rename Page</button>
+                        @if (_mapping.GridPages.Count > 1)
+                        {
+                            <button type="button" class="btn btn-xs btn-ghost" style="color:var(--err);" @onclick="DeleteActivePageAsync">Delete Page</button>
+                        }
+                    }
+                </div>
+            }
+        </div>
+
+        <!-- MAIN WORKSPACE -->
+        <div class="studio-body">
+            <!-- COLLAPSIBLE LEFT FUNCTOID TOOLBOX -->
+            @if (_showToolbox)
+            {
+                <aside class="toolbox-drawer">
+                    <div style="padding:8px; border-bottom:1px solid var(--border-subtle); display:flex; flex-direction:column; gap:6px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <strong style="font-size:12px;">Functoid Toolbox</strong>
+                            <a href="/functoids" class="btn btn-xs btn-ghost" title="Create or edit Custom Functoids">+ Custom</a>
+                        </div>
+                        <input class="input input-sm" placeholder="Filter functoids..." @bind="_toolboxFilter" @bind:event="oninput" />
+                    </div>
+
+                    <div class="toolbox-scroll">
+                        @foreach (var grp in FilteredToolboxGroups)
+                        {
+                            <div class="toolbox-cat-title">@grp.Key</div>
+                            @foreach (var fn in grp)
+                            {
+                                <div class="toolbox-item"
+                                     draggable="true"
+                                     ondragstart="event.dataTransfer.setData('text/mapdoc-functoid', '@fn.Id'); event.dataTransfer.effectAllowed='copy';"
+                                     @onclick="() => AddFunctoidToCanvasAsync(fn)"
+                                     title="@fn.Description (Click or drag onto canvas)">
+                                    <span class="fn-symbol-badge">@fn.Symbol</span>
+                                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">@fn.Name</span>
+                                </div>
+                            }
+                        }
+                    </div>
+                </aside>
+            }
+
+            <!-- 3-PANE BIZTALK STAGE (SOURCE TREE + SVG/FUNCTOID CANVAS + TARGET TREE) -->
+            <div id="@_stageElementId" class="mapper-stage">
+                <!-- LEFT: SOURCE TYPE TREE -->
+                <div class="tree-pane source-pane">
+                    <div class="tree-header">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <strong style="font-size:12px;">SOURCE: @(_sourceType?.Name ?? "Missing")</strong>
+                            <div style="display:flex; gap:3px;">
+                                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => ExpandAllMappedSource()" title="Expand mapped paths">Mapped</button>
+                                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => { _expandedSourcePaths.Clear(); RebuildTrees(); }" title="Collapse all">Collapse</button>
+                            </div>
+                        </div>
+                        <input class="input input-sm" placeholder="Filter source properties..." @bind="_sourceFilter" @bind:event="oninput" />
+                    </div>
+
+                    <div class="tree-scroll">
+                        @foreach (var node in VisibleSourceNodes)
+                        {
+                            var portSevClass = GetSourcePortClass(node.Path);
+                            <div class="tree-row @(_selectedPropertySide == "source" && _selectedPropertyNode?.Path == node.Path ? "selected" : "")"
+                                 style="padding-left:@(6 + node.Depth * 15)px;"
+                                 @onclick="() => SelectPropertyNode(node, isSource: true)"
+                                 title="@node.DisplayPath — @node.TypeFullDisplay @(string.IsNullOrWhiteSpace(node.Description) ? "" : $"\n{node.Description}")">
+
+                                @if (node.CanExpand)
+                                {
+                                    <button type="button" class="tree-chevron" @onclick:stopPropagation="true" @onclick="() => ToggleSourceExpand(node)">
+                                        @(node.IsExpanded ? "▾" : "▸")
+                                    </button>
+                                }
+                                else
+                                {
+                                    <span style="width:16px; flex-shrink:0;"></span>
+                                }
+
+                                <span class="tree-name" style="flex:1;">@node.Name</span>
+
+                                @if (node.IsRecursiveCycle)
+                                {
+                                    <span class="tree-cycle-flag" title="Recursive / self-referential type">↻</span>
+                                }
+                                @if (node.IsOptional)
+                                {
+                                    <span class="tree-mod-flag" title="Optional property">?</span>
+                                }
+                                @if (node.IsNullable)
+                                {
+                                    <span class="tree-mod-flag" title="Nullable property">∅</span>
+                                }
+
+                                <span class="pill pill-@node.Type.BaseKind">@node.TypeBadge</span>
+
+                                <button type="button"
+                                        class="port-pin @portSevClass"
+                                        data-port-id="src:@node.Path"
+                                        data-port-side="out"
+                                        title="Drag to map '@node.DisplayPath' (@node.TypeFullDisplay)"></button>
+                            </div>
+                        }
+                    </div>
+                </div>
+
+                <!-- CENTER: FUNCTOID CANVAS -->
+                <div class="canvas-pane" @onclick="ClearSelectionIfCanvasBackground">
+                    <div class="canvas-surface" style="min-height:@(Math.Max(780, GetRequiredCanvasHeight()))px;">
+                        @if (_activePage is not null)
+                        {
+                            @if (_activePage.Links.Count == 0 && _activePage.FunctoidInstances.Count == 0)
+                            {
+                                <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; padding:24px; text-align:center;">
+                                    <div style="max-width:340px; color:var(--text-muted); font-size:12.5px;">
+                                        <div style="font-size:14px; font-weight:600; color:var(--text-secondary); margin-bottom:6px;">Drag between pins to map properties</div>
+                                        Drag from any Source pin (left) to a Target pin (right), or drop Functoids from the Toolbox to transform values along the way.
+                                    </div>
+                                </div>
+                            }
+
+                            @foreach (var inst in _activePage.FunctoidInstances)
+                            {
+                                var def = ResolveFunctoidDef(inst);
+                                var fnSev = _report.GetFunctoidSeverity(inst.Id);
+                                var sevCss = fnSev == ValidationSeverity.Error ? "sev-error" : fnSev == ValidationSeverity.Warning ? "sev-warning" : "";
+                                var pins = GetRenderedInputPins(inst, def);
+                                var configPreview = FormatConfigInlinePreview(inst);
+
+                                <div class="functoid-card @(_selectedFunctoid?.Id == inst.Id ? "selected" : "") @sevCss"
+                                     data-functoid-id="@inst.Id"
+                                     style="left:@(inst.X.ToString("0"))px; top:@(inst.Y.ToString("0"))px;"
+                                     @onclick:stopPropagation="true"
+                                     @onclick="() => SelectFunctoidInstance(inst)">
+
+                                    <div class="functoid-drag-handle">
+                                        <div style="display:flex; align-items:center; gap:6px; min-width:0;">
+                                            <span class="fn-symbol-badge">@(def?.Symbol ?? "fx")</span>
+                                            <span class="functoid-title">@(string.IsNullOrWhiteSpace(inst.LabelOverride) ? (def?.Name ?? "Unknown") : inst.LabelOverride)</span>
+                                        </div>
+                                        @if (!string.IsNullOrWhiteSpace(inst.Comment))
+                                        {
+                                            <span title="@inst.Comment" style="font-size:11px;">💬</span>
+                                        }
+                                    </div>
+
+                                    <div class="functoid-body">
+                                        <div class="functoid-inputs">
+                                            @foreach (var pin in pins)
+                                            {
+                                                var pinConnected = _activePage.Links.Any(l => l.TargetFunctoidInstanceId == inst.Id && l.TargetInputIndex == pin.Index);
+                                                <div class="functoid-pin-row">
+                                                    <button type="button"
+                                                            class="port-pin @(pinConnected ? "connected" : "")"
+                                                            data-port-id="fn-in:@inst.Id:@pin.Index"
+                                                            data-port-side="in"
+                                                            title="Input #@(pin.Index + 1): @pin.Name (@pin.TypeSpec.FormatDisplay(_typeNames))"></button>
+                                                    <span>@pin.Name</span>
+                                                </div>
+                                            }
+                                        </div>
+
+                                        <div class="functoid-output">
+                                            <span>out</span>
+                                            @{
+                                                var outConnected = _activePage.Links.Any(l => l.SourceFunctoidInstanceId == inst.Id);
+                                            }
+                                            <button type="button"
+                                                    class="port-pin @(outConnected ? "connected" : "")"
+                                                    data-port-id="fn-out:@inst.Id"
+                                                    data-port-side="out"
+                                                    title="Output (@(def?.OutputType.FormatDisplay(_typeNames) ?? "any"))"></button>
+                                        </div>
+                                    </div>
+
+                                    @if (!string.IsNullOrWhiteSpace(configPreview) || !string.IsNullOrWhiteSpace(inst.Comment))
+                                    {
+                                        <div class="functoid-meta-bar" title="@(string.IsNullOrWhiteSpace(inst.Comment) ? configPreview : inst.Comment)">
+                                            @(!string.IsNullOrWhiteSpace(configPreview) ? configPreview : inst.Comment)
+                                        </div>
+                                    }
+                                </div>
+                            }
+                        }
+                    </div>
+                </div>
+
+                <!-- RIGHT: TARGET TYPE TREE -->
+                <div class="tree-pane target-pane">
+                    <div class="tree-header">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <strong style="font-size:12px;">TARGET: @(_targetType?.Name ?? "Missing")</strong>
+                            <div style="display:flex; gap:3px;">
+                                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => ExpandAllMappedTarget()" title="Expand mapped paths">Mapped</button>
+                                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => { _expandedTargetPaths.Clear(); RebuildTrees(); }" title="Collapse all">Collapse</button>
+                            </div>
+                        </div>
+                        <input class="input input-sm" placeholder="Filter target properties..." @bind="_targetFilter" @bind:event="oninput" />
+                    </div>
+
+                    <div class="tree-scroll">
+                        @foreach (var node in VisibleTargetNodes)
+                        {
+                            var portSevClass = GetTargetPortClass(node.Path);
+                            <div class="tree-row @(_selectedPropertySide == "target" && _selectedPropertyNode?.Path == node.Path ? "selected" : "")"
+                                 @onclick="() => SelectPropertyNode(node, isSource: false)"
+                                 title="@node.DisplayPath — @node.TypeFullDisplay @(string.IsNullOrWhiteSpace(node.Description) ? "" : $"\n{node.Description}")">
+
+                                <button type="button"
+                                        class="port-pin @portSevClass"
+                                        data-port-id="tgt:@node.Path"
+                                        data-port-side="in"
+                                        title="Drop here to map into '@node.DisplayPath' (@node.TypeFullDisplay)"></button>
+
+                                <span style="width:@(node.Depth * 14)px; flex-shrink:0;"></span>
+
+                                @if (node.CanExpand)
+                                {
+                                    <button type="button" class="tree-chevron" @onclick:stopPropagation="true" @onclick="() => ToggleTargetExpand(node)">
+                                        @(node.IsExpanded ? "▾" : "▸")
+                                    </button>
+                                }
+                                else
+                                {
+                                    <span style="width:16px; flex-shrink:0;"></span>
+                                }
+
+                                <span class="tree-name" style="flex:1;">@node.Name</span>
+
+                                @if (node.IsRecursiveCycle)
+                                {
+                                    <span class="tree-cycle-flag" title="Recursive / self-referential type">↻</span>
+                                }
+                                @if (node.IsOptional)
+                                {
+                                    <span class="tree-mod-flag" title="Optional property">?</span>
+                                }
+                                @if (node.IsNullable)
+                                {
+                                    <span class="tree-mod-flag" title="Nullable property">∅</span>
+                                }
+
+                                <span class="pill pill-@node.Type.BaseKind">@node.TypeBadge</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+
+                <!-- STAGE-WIDE SVG OVERLAY FOR BÉZIER WIRES & LIVE RUBBER-BAND DRAG -->
+                <svg class="mapper-svg-overlay">
+                    @if (_activePage is not null)
+                    {
+                        var visibleSrcSet = VisibleSourceNodes.Select(n => n.Path).ToHashSet(StringComparer.Ordinal);
+                        var visibleTgtSet = VisibleTargetNodes.Select(n => n.Path).ToHashSet(StringComparer.Ordinal);
+
+                        @foreach (var link in _activePage.Links)
+                        {
+                            var (fromPort, srcRolledUp) = ResolveSvgFromPort(link, visibleSrcSet);
+                            var (toPort, tgtRolledUp) = ResolveSvgToPort(link, visibleTgtSet);
+                            if (fromPort is null || toPort is null) continue;
+
+                            var linkSev = _report.GetLinkSeverity(link.Id);
+                            var sevClass = linkSev switch
+                            {
+                                ValidationSeverity.Error => "wire-error",
+                                ValidationSeverity.Warning => "wire-warning",
+                                _ => "wire-valid"
+                            };
+                            var rollupClass = (srcRolledUp || tgtRolledUp) ? "wire-rollup" : "";
+                            var selectedClass = _selectedLink?.Id == link.Id ? "selected" : "";
+
+                            <g @key="link.Id"
+                               class="wire-group @sevClass @rollupClass @selectedClass"
+                               data-wire-id="@link.Id"
+                               data-from-port="@fromPort"
+                               data-to-port="@toPort">
+                                <path class="wire-hit" @onclick="() => SelectLink(link)" />
+                                <path class="wire-line" />
+
+                                @if (!string.IsNullOrWhiteSpace(link.Comment))
+                                {
+                                    <g class="wire-comment-badge" @onclick="() => SelectLink(link)">
+                                        <rect x="-12" y="-10" width="24" height="20" rx="5" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.2" />
+                                        <text x="0" y="4" text-anchor="middle" font-size="11">💬</text>
+                                        <title>@link.Comment</title>
+                                    </g>
+                                }
+                            </g>
+                        }
+                    }
+
+                    <path class="draft-wire-path" style="display:none;" />
+                </svg>
+
+                <div class="draft-wire-tooltip" style="display:none;"></div>
+            </div>
+
+            <!-- RIGHT INSPECTOR PANEL -->
+            <aside class="inspector-drawer">
+                <div style="padding:10px 12px; border-bottom:1px solid var(--border-subtle); background:var(--bg-elevated); font-weight:700; font-size:12.5px;">
+                    @if (_selectedLink is not null)
+                    {
+                        <span>Wire / Mapping Inspector</span>
+                    }
+                    else if (_selectedFunctoid is not null)
+                    {
+                        <span>Functoid Instance Inspector</span>
+                    }
+                    else if (_selectedPropertyNode is not null)
+                    {
+                        <span>Property Inspector (@_selectedPropertySide)</span>
+                    }
+                    else
+                    {
+                        <span>Inspector</span>
+                    }
+                </div>
+
+                <div class="inspector-body">
+                    @if (_selectedLink is not null)
+                    {
+                        var lSev = _report.GetLinkSeverity(_selectedLink.Id);
+                        var lDiags = _report.LinkDiagnostics.GetValueOrDefault(_selectedLink.Id) ?? [];
+
+                        <div class="card" style="padding:10px;">
+                            <div style="font-size:11px; color:var(--text-muted); font-weight:700; margin-bottom:4px;">CONNECTION</div>
+                            <div style="font-size:12px;">
+                                <strong>From:</strong> <code>@DescribeLinkSource(_selectedLink)</code>
+                            </div>
+                            <div style="font-size:12px; margin-top:4px;">
+                                <strong>To:</strong> <code>@DescribeLinkTarget(_selectedLink)</code>
+                            </div>
+
+                            <div style="margin-top:8px;">
+                                @if (lSev == ValidationSeverity.Error)
+                                {
+                                    <span class="status-pill status-err">Error</span>
+                                }
+                                else if (lSev == ValidationSeverity.Warning)
+                                {
+                                    <span class="status-pill status-warn">Warning</span>
+                                }
+                                else
+                                {
+                                    <span class="status-pill status-ok">Valid Connection</span>
+                                }
+                            </div>
+                        </div>
+
+                        @if (lDiags.Count > 0)
+                        {
+                            <div style="display:flex; flex-direction:column; gap:6px;">
+                                @foreach (var d in lDiags)
+                                {
+                                    <div style="padding:8px 10px; border-radius:6px; font-size:12px; background:@(d.Severity == ValidationSeverity.Error ? "var(--err-soft)" : "var(--warn-soft)"); color:@(d.Severity == ValidationSeverity.Error ? "var(--err)" : "var(--warn)");">
+                                        @d.Message
+                                    </div>
+                                }
+                            </div>
+                        }
+
+                        <div>
+                            <label class="field-label">Mapping Comment / Business Note</label>
+                            <textarea class="input"
+                                      rows="3"
+                                      placeholder="Document transformation rules, edge cases, or rationale for this link..."
+                                      value="@_selectedLink.Comment"
+                                      @onchange="OnSelectedLinkCommentChangedAsync"></textarea>
+                        </div>
+
+                        <!-- ONE-CLICK INSERT FUNCTOID ON WIRE -->
+                        <div class="card" style="padding:10px;">
+                            <label class="field-label">Insert Functoid on Wire</label>
+                            <div style="display:flex; gap:6px;">
+                                <select class="input input-sm" @bind="_insertFunctoidDefId">
+                                    @foreach (var f in _functoids.Where(x => x.Inputs.Count > 0 || x.IsVariadic))
+                                    {
+                                        <option value="@f.Id">@f.Name (@f.Category)</option>
+                                    }
+                                </select>
+                                <button type="button" class="btn btn-xs btn-primary" @onclick="InsertFunctoidOnSelectedWireAsync">Insert</button>
+                            </div>
+                        </div>
+
+                        <button type="button" class="btn btn-sm btn-danger" @onclick="DeleteSelectedLinkAsync">
+                            Delete Wire
+                        </button>
+                    }
+                    else if (_selectedFunctoid is not null)
+                    {
+                        var def = ResolveFunctoidDef(_selectedFunctoid);
+                        var fDiags = _report.FunctoidDiagnostics.GetValueOrDefault(_selectedFunctoid.Id) ?? [];
+
+                        <div class="card" style="padding:10px;">
+                            <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                                <span class="fn-symbol-badge">@(def?.Symbol ?? "fx")</span>
+                                <strong>@(def?.Name ?? "Unknown")</strong>
+                            </div>
+                            <div style="font-size:12px; color:var(--text-secondary);">@(def?.Description)</div>
+                            @if (def is not null)
+                            {
+                                <div style="margin-top:6px; font-size:11.5px;">
+                                    <strong>Output:</strong> <code>@def.OutputType.FormatDisplay(_typeNames)</code>
+                                </div>
+                            }
+                        </div>
+
+                        @if (fDiags.Count > 0)
+                        {
+                            @foreach (var d in fDiags)
+                            {
+                                <div style="padding:8px 10px; border-radius:6px; font-size:12px; background:@(d.Severity == ValidationSeverity.Error ? "var(--err-soft)" : "var(--warn-soft)"); color:@(d.Severity == ValidationSeverity.Error ? "var(--err)" : "var(--warn)");">
+                                    @d.Message
+                                </div>
+                            }
+                        }
+
+                        <div>
+                            <label class="field-label">Canvas Label Override (optional)</label>
+                            <input class="input input-sm"
+                                   placeholder="@(def?.Name)"
+                                   value="@_selectedFunctoid.LabelOverride"
+                                   @onchange="OnFunctoidLabelChangedAsync" />
+                        </div>
+
+                        @if (def is not null && def.ConfigParams.Count > 0)
+                        {
+                            <div class="card" style="padding:10px; display:flex; flex-direction:column; gap:8px;">
+                                <div class="field-label" style="margin:0;">Configuration Parameters</div>
+                                @foreach (var cp in def.ConfigParams)
+                                {
+                                    var curVal = _selectedFunctoid.ConfigValues.GetValueOrDefault(cp.Key, cp.DefaultValue);
+                                    <div>
+                                        <label style="font-size:11.5px; font-weight:600; display:block; margin-bottom:2px;">@cp.Label @(cp.IsRequired ? "*" : "")</label>
+                                        <input class="input input-sm mono"
+                                               placeholder="@cp.Placeholder"
+                                               value="@curVal"
+                                               @onchange="e => OnFunctoidConfigChangedAsync(cp.Key, e.Value?.ToString() ?? string.Empty)" />
+                                        @if (!string.IsNullOrWhiteSpace(cp.Description))
+                                        {
+                                            <div style="font-size:10.5px; color:var(--text-muted); margin-top:2px;">@cp.Description</div>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+
+                        <div>
+                            <label class="field-label">Functoid Comment / Notes</label>
+                            <textarea class="input"
+                                      rows="3"
+                                      placeholder="Explain why/how this functoid is used in this transformation..."
+                                      value="@_selectedFunctoid.Comment"
+                                      @onchange="OnSelectedFunctoidCommentChangedAsync"></textarea>
+                        </div>
+
+                        <button type="button" class="btn btn-sm btn-danger" @onclick="DeleteSelectedFunctoidAsync">
+                            Delete Functoid Instance
+                        </button>
+                    }
+                    else if (_selectedPropertyNode is not null)
+                    {
+                        <div class="card" style="padding:10px; display:flex; flex-direction:column; gap:6px;">
+                            <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">@_selectedPropertySide Property</div>
+                            <strong class="mono" style="font-size:13px;">@_selectedPropertyNode.DisplayPath</strong>
+                            <div>
+                                <span class="pill pill-@_selectedPropertyNode.Type.BaseKind">@_selectedPropertyNode.TypeFullDisplay</span>
+                            </div>
+                            <div style="font-size:12px; color:var(--text-secondary);">
+                                Nullable: <strong>@(_selectedPropertyNode.IsNullable ? "Yes" : "No")</strong> ·
+                                Optional: <strong>@(_selectedPropertyNode.IsOptional ? "Yes" : "No")</strong>
+                                @if (_selectedPropertyNode.ArrayDepth > 0)
+                                {
+                                    <span> · Array depth: <strong>@_selectedPropertyNode.ArrayDepth</strong></span>
+                                }
+                            </div>
+                            @if (!string.IsNullOrWhiteSpace(_selectedPropertyNode.Description))
+                            {
+                                <p style="margin:4px 0 0; font-size:12px;">@_selectedPropertyNode.Description</p>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <div style="color:var(--text-secondary); font-size:12.5px; line-height:1.55;">
+                            <p style="margin-top:0;"><strong>Selection Inspector</strong></p>
+                            <ul style="padding-left:18px; margin:0;">
+                                <li>Click any <strong>wire</strong> to inspect type validation, add a mapping comment, or insert a functoid.</li>
+                                <li>Click any <strong>functoid card</strong> to configure literal parameters and add a functoid comment.</li>
+                                <li>Click any <strong>property row</strong> in the Source or Target tree to view full schema details.</li>
+                            </ul>
+                        </div>
+                    }
+                </div>
+            </aside>
+        </div>
+
+        <!-- COLLAPSIBLE BOTTOM VALIDATION & COMMENTS DOCK -->
+        @if (_showBottomDock)
+        {
+            <div class="bottom-dock">
+                <div class="bottom-dock-header">
+                    <div style="display:flex; gap:6px;">
+                        <button type="button"
+                                class="btn btn-xs @(_bottomTab == BottomTab.Diagnostics ? "btn-primary" : "btn-ghost")"
+                                @onclick="() => _bottomTab = BottomTab.Diagnostics">
+                            Validation (@_report.ErrorCount Error(s), @_report.WarningCount Warning(s))
+                        </button>
+                        <button type="button"
+                                class="btn btn-xs @(_bottomTab == BottomTab.Comments ? "btn-primary" : "btn-ghost")"
+                                @onclick="() => _bottomTab = BottomTab.Comments">
+                            Comments (@CountAllComments())
+                        </button>
+                    </div>
+                    <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _showBottomDock = false">Hide ▾</button>
+                </div>
+
+                <div class="bottom-dock-scroll">
+                    @if (_bottomTab == BottomTab.Diagnostics)
+                    {
+                        @if (_report.Diagnostics.Count == 0)
+                        {
+                            <div style="padding:14px; color:var(--ok); font-weight:600;">
+                                ✓ All connections and functoids across all grid pages are valid with zero warnings.
+                            </div>
+                        }
+                        else
+                        {
+                            <table class="diag-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width:90px;">Severity</th>
+                                        <th style="width:150px;">Grid Page</th>
+                                        <th>Diagnostic Message</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var d in _report.Diagnostics.OrderByDescending(x => x.Severity))
+                                    {
+                                        <tr @onclick="() => JumpToDiagnostic(d)">
+                                            <td>
+                                                <span class="status-pill @(d.Severity == ValidationSeverity.Error ? "status-err" : "status-warn")">
+                                                    @d.Severity
+                                                </span>
+                                            </td>
+                                            <td>@d.GridPageName</td>
+                                            <td>@d.Message</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    }
+                    else
+                    {
+                        <table class="diag-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:120px;">Element</th>
+                                    <th style="width:150px;">Grid Page</th>
+                                    <th style="width:260px;">Context</th>
+                                    <th>Comment</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var pg in _mapping.GridPages.OrderBy(p => p.SortOrder))
+                                {
+                                    @foreach (var fi in pg.FunctoidInstances.Where(f => !string.IsNullOrWhiteSpace(f.Comment)))
+                                    {
+                                        var fDef = ResolveFunctoidDef(fi);
+                                        <tr @onclick="() => { SwitchGridPage(pg); SelectFunctoidInstance(fi); }">
+                                            <td><span class="pill pill-Number">Functoid</span></td>
+                                            <td>@pg.Name</td>
+                                            <td><code>@(fDef?.Name ?? "Functoid")</code></td>
+                                            <td>@fi.Comment</td>
+                                        </tr>
+                                    }
+                                    @foreach (var ln in pg.Links.Where(l => !string.IsNullOrWhiteSpace(l.Comment)))
+                                    {
+                                        <tr @onclick="() => { SwitchGridPage(pg); SelectLink(ln); }">
+                                            <td><span class="pill pill-String">Wire</span></td>
+                                            <td>@pg.Name</td>
+                                            <td><code>@DescribeLinkSource(ln) → @DescribeLinkTarget(ln)</code></td>
+                                            <td>@ln.Comment</td>
+                                        </tr>
+                                    }
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+<!-- MAPPING SETTINGS MODAL -->
+@if (_showSettingsModal && _mapping is not null)
+{
+    <div class="modal-backdrop" @onclick="() => _showSettingsModal = false">
+        <div class="modal-panel" style="max-width:520px;" @onclick:stopPropagation="true">
+            <div class="modal-header">
+                <span>Mapping Settings</span>
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _showSettingsModal = false">✕</button>
+            </div>
+            <div class="modal-body">
+                <div>
+                    <label class="field-label">Mapping Name *</label>
+                    <input class="input" @bind="_mapping.Name" />
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    <div>
+                        <label class="field-label">Namespace</label>
+                        <input class="input" @bind="_mapping.Namespace" />
+                    </div>
+                    <div>
+                        <label class="field-label">Tags</label>
+                        <input class="input" @bind="_mapping.Tags" />
+                    </div>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    <div>
+                        <label class="field-label">Source Type</label>
+                        <select class="input" @bind="_mapping.SourceTypeId">
+                            @foreach (var t in _typeCatalog.Values.OrderBy(x => x.QualifiedName))
+                            {
+                                <option value="@t.Id">@t.QualifiedName</option>
+                            }
+                        </select>
+                    </div>
+                    <div>
+                        <label class="field-label">Target Type</label>
+                        <select class="input" @bind="_mapping.TargetTypeId">
+                            @foreach (var t in _typeCatalog.Values.OrderBy(x => x.QualifiedName))
+                            {
+                                <option value="@t.Id">@t.QualifiedName</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="field-label">Description</label>
+                    <textarea class="input" rows="3" @bind="_mapping.Description"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" @onclick="() => _showSettingsModal = false">Close</button>
+                <button type="button" class="btn btn-primary" @onclick="SaveSettingsAsync">Save Changes</button>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- EXPORT SPECIFICATION MODAL -->
+@if (_showExportModal && _mapping is not null)
+{
+    <div class="modal-backdrop" @onclick="() => _showExportModal = false">
+        <div class="modal-panel" style="max-width:860px;" @onclick:stopPropagation="true">
+            <div class="modal-header">
+                <span>Export Transformation Documentation — @_mapping.QualifiedName</span>
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _showExportModal = false">✕</button>
+            </div>
+            <div class="modal-body">
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <button type="button" class="btn btn-sm btn-primary" @onclick="CopyMarkdownSpecAsync">@_copyBtnLabel</button>
+                    <a href="/api/export/mappings/@_mapping.Id/markdown" target="_blank" class="btn btn-sm">Download .md File</a>
+                    <a href="/api/export/mappings/@_mapping.Id/html" target="_blank" class="btn btn-sm">Open Printable HTML Spec ↗</a>
+                    <a href="/api/export/mappings/@_mapping.Id/html?download=true" target="_blank" class="btn btn-sm">Download .html File</a>
+                </div>
+                <pre class="mono" style="margin:0; padding:12px; border-radius:8px; background:var(--bg-app); border:1px solid var(--border-subtle); max-height:420px; overflow:auto; font-size:12px; white-space:pre-wrap;">@_exportedMarkdown</pre>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" @onclick="() => _showExportModal = false">Close</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid MappingId { get; set; }
+
+    private enum BottomTab { Diagnostics, Comments }
+
+    private readonly string _stageElementId = $"mapper-stage-{Guid.NewGuid():N}";
+    private IJSObjectReference? _jsModule;
+    private DotNetObjectReference<MapperStudioPage>? _dotNetRef;
+    private bool _stageInitialized;
+
+    private bool _loading = true;
+    private MappingDefinition? _mapping;
+    private MappingGridPage? _activePage;
+    private TypeDefinition? _sourceType;
+    private TypeDefinition? _targetType;
+
+    private Dictionary<Guid, TypeDefinition> _typeCatalog = [];
+    private Dictionary<Guid, string> _typeNames = [];
+    private List<FunctoidDefinition> _functoids = [];
+    private Dictionary<Guid, FunctoidDefinition> _functoidCatalog = [];
+
+    private HashSet<string> _expandedSourcePaths = new(StringComparer.Ordinal);
+    private HashSet<string> _expandedTargetPaths = new(StringComparer.Ordinal);
+    private List<MapperTreeNode> _sourceTree = [];
+    private List<MapperTreeNode> _targetTree = [];
+    private string _sourceFilter = string.Empty;
+    private string _targetFilter = string.Empty;
+
+    private bool _showToolbox = true;
+    private string _toolboxFilter = string.Empty;
+    private bool _showBottomDock = true;
+    private BottomTab _bottomTab = BottomTab.Diagnostics;
+
+    private MappingValidationReport _report = new();
+    private string _saveStatusText = "✓ Saved";
+
+    // Selection state
+    private MappingLink? _selectedLink;
+    private MappingFunctoidInstance? _selectedFunctoid;
+    private MapperTreeNode? _selectedPropertyNode;
+    private string _selectedPropertySide = string.Empty;
+    private Guid _insertFunctoidDefId;
+
+    // Grid Page rename state
+    private bool _renamingPage;
+    private string _renamePageBuffer = string.Empty;
+
+    // Modals
+    private bool _showSettingsModal;
+    private bool _showExportModal;
+    private string _exportedMarkdown = string.Empty;
+    private string _copyBtnLabel = "Copy Markdown";
+
+    public sealed record WirePreviewDto(string Severity, string Message);
+
+    private IEnumerable<IGrouping<FunctoidCategory, FunctoidDefinition>> FilteredToolboxGroups =>
+        _functoids
+            .Where(f => string.IsNullOrWhiteSpace(_toolboxFilter) ||
+                        f.Name.Contains(_toolboxFilter, StringComparison.OrdinalIgnoreCase) ||
+                        f.Description.Contains(_toolboxFilter, StringComparison.OrdinalIgnoreCase))
+            .GroupBy(f => f.Category);
+
+    private List<MapperTreeNode> VisibleSourceNodes =>
+        FilterVisibleNodes(PropertyPathResolver.FlattenVisible(_sourceTree), _sourceFilter);
+
+    private List<MapperTreeNode> VisibleTargetNodes =>
+        FilterVisibleNodes(PropertyPathResolver.FlattenVisible(_targetTree), _targetFilter);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _stageInitialized = false;
+
+        _typeCatalog = await Catalog.GetTypeCatalogDictionaryAsync();
+        _typeNames = _typeCatalog.ToDictionary(k => k.Key, v => v.Value.Name);
+        _functoids = await Catalog.GetFunctoidsAsync();
+        _functoidCatalog = _functoids.ToDictionary(f => f.Id);
+        _insertFunctoidDefId = _functoids.FirstOrDefault(f => f.PresetKey == "preset.tostring")?.Id
+                               ?? _functoids.FirstOrDefault()?.Id
+                               ?? Guid.Empty;
+
+        _mapping = await Catalog.GetMappingByIdAsync(MappingId);
+        if (_mapping is not null)
+        {
+            _typeCatalog.TryGetValue(_mapping.SourceTypeId, out _sourceType);
+            _typeCatalog.TryGetValue(_mapping.TargetTypeId, out _targetType);
+
+            _activePage = _mapping.GridPages.OrderBy(p => p.SortOrder).FirstOrDefault();
+
+            // Auto-expand all paths referenced across the mapping so connections are visible immediately
+            ExpandAllMappedSource(rebuild: false);
+            ExpandAllMappedTarget(rebuild: false);
+            RebuildTrees();
+            Revalidate();
+        }
+
+        _loading = false;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_mapping is null) return;
+
+        _jsModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/mapperCanvas.js");
+        _dotNetRef ??= DotNetObjectReference.Create(this);
+
+        if (!_stageInitialized)
+        {
+            _stageInitialized = true;
+            await _jsModule.InvokeVoidAsync("initMapperStage", _stageElementId, _dotNetRef);
+        }
+        else
+        {
+            await _jsModule.InvokeVoidAsync("syncMapperStage", _stageElementId);
+        }
+    }
+
+    // ==================== JS-INVOKABLE DRAG-AND-DROP HANDLERS ====================
+
+    [JSInvokable]
+    public Task<WirePreviewDto> PreviewWireDropAsync(string fromPortId, string toPortId)
+    {
+        if (_mapping is null || _activePage is null)
+        {
+            return Task.FromResult(new WirePreviewDto("neutral", ""));
+        }
+
+        var candidate = ParseCandidateLink(fromPortId, toPortId);
+        if (candidate is null)
+        {
+            return Task.FromResult(new WirePreviewDto("error", "Incompatible port directions."));
+        }
+
+        // Simulate replacing existing wire on the exact same functoid input pin if occupied
+        var pageForSim = new MappingGridPage
+        {
+            Id = _activePage.Id,
+            MappingId = _mapping.Id,
+            Name = _activePage.Name,
+            SortOrder = _activePage.SortOrder,
+            FunctoidInstances = _activePage.FunctoidInstances.ToList(),
+            Links = _activePage.Links
+                .Where(l => !(candidate.TargetFunctoidInstanceId.HasValue &&
+                              l.TargetFunctoidInstanceId == candidate.TargetFunctoidInstanceId &&
+                              l.TargetInputIndex == candidate.TargetInputIndex))
+                .ToList()
+        };
+
+        var simMapping = new MappingDefinition
+        {
+            Id = _mapping.Id,
+            Name = _mapping.Name,
+            SourceTypeId = _mapping.SourceTypeId,
+            TargetTypeId = _mapping.TargetTypeId,
+            GridPages = _mapping.GridPages.Select(p => p.Id == pageForSim.Id ? pageForSim : p).ToList()
+        };
+
+        var (sev, messages) = MappingValidator.PreviewCandidateLink(simMapping, pageForSim, candidate, _typeCatalog, _functoidCatalog);
+        var sevStr = sev switch
+        {
+            ValidationSeverity.Error => "error",
+            ValidationSeverity.Warning => "warning",
+            _ => "valid"
+        };
+        var msg = messages.Count > 0 ? string.Join(" ", messages) : "✓ Compatible types";
+        return Task.FromResult(new WirePreviewDto(sevStr, msg));
+    }
+
+    [JSInvokable]
+    public async Task CompleteWireDropAsync(string fromPortId, string toPortId)
+    {
+        if (_mapping is null || _activePage is null) return;
+
+        var newLink = ParseCandidateLink(fromPortId, toPortId);
+        if (newLink is null) return;
+
+        // Prevent exact duplicate link
+        var duplicate = _activePage.Links.FirstOrDefault(l =>
+            l.SourcePropertyPath == newLink.SourcePropertyPath &&
+            l.SourceFunctoidInstanceId == newLink.SourceFunctoidInstanceId &&
+            l.TargetPropertyPath == newLink.TargetPropertyPath &&
+            l.TargetFunctoidInstanceId == newLink.TargetFunctoidInstanceId &&
+            l.TargetInputIndex == newLink.TargetInputIndex);
+
+        if (duplicate is not null)
+        {
+            SelectLink(duplicate);
+            StateHasChanged();
+            return;
+        }
+
+        // If dropping onto an already-wired functoid input pin, replace the old wire on that pin
+        if (newLink.TargetFunctoidInstanceId.HasValue && newLink.TargetInputIndex.HasValue)
+        {
+            _activePage.Links.RemoveAll(l =>
+                l.TargetFunctoidInstanceId == newLink.TargetFunctoidInstanceId &&
+                l.TargetInputIndex == newLink.TargetInputIndex);
+        }
+
+        _activePage.Links.Add(newLink);
+        SelectLink(newLink);
+        await PersistAndRefreshAsync();
+    }
+
+    [JSInvokable]
+    public async Task CommitFunctoidPositionAsync(string instanceIdStr, double x, double y)
+    {
+        if (_activePage is null || !Guid.TryParse(instanceIdStr, out var id)) return;
+        var inst = _activePage.FunctoidInstances.FirstOrDefault(f => f.Id == id);
+        if (inst is null) return;
+
+        inst.X = x;
+        inst.Y = y;
+        SelectFunctoidInstance(inst);
+        await PersistAndRefreshAsync(revalidate: false);
+    }
+
+    [JSInvokable]
+    public async Task DropToolboxFunctoidAsync(string functoidDefIdStr, double x, double y)
+    {
+        if (!Guid.TryParse(functoidDefIdStr, out var defId)) return;
+        if (!_functoidCatalog.TryGetValue(defId, out var def)) return;
+        await AddFunctoidInstanceAtAsync(def, x, y);
+    }
+
+    // ==================== STUDIO ACTIONS ====================
+
+    private async Task AddFunctoidToCanvasAsync(FunctoidDefinition def)
+    {
+        if (_activePage is null) return;
+        double nextY = 36 + (_activePage.FunctoidInstances.Count * 92) % 560;
+        double nextX = 180 + (_activePage.FunctoidInstances.Count / 6) * 185;
+        await AddFunctoidInstanceAtAsync(def, nextX, nextY);
+    }
+
+    private async Task AddFunctoidInstanceAtAsync(FunctoidDefinition def, double x, double y)
+    {
+        if (_activePage is null) return;
+        var defaults = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var cp in def.ConfigParams.Where(c => !string.IsNullOrEmpty(c.DefaultValue)))
+        {
+            defaults[cp.Key] = cp.DefaultValue;
+        }
+
+        var inst = new MappingFunctoidInstance
+        {
+            Id = Guid.NewGuid(),
+            GridPageId = _activePage.Id,
+            FunctoidDefinitionId = def.Id,
+            FunctoidDefinition = def,
+            X = x,
+            Y = y,
+            ConfigValues = defaults
+        };
+
+        _activePage.FunctoidInstances.Add(inst);
+        SelectFunctoidInstance(inst);
+        await PersistAndRefreshAsync();
+    }
+
+    private async Task InsertFunctoidOnSelectedWireAsync()
+    {
+        if (_activePage is null || _selectedLink is null) return;
+        if (!_functoidCatalog.TryGetValue(_insertFunctoidDefId, out var def)) return;
+
+        var oldLink = _selectedLink;
+        var defaults = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var cp in def.ConfigParams.Where(c => !string.IsNullOrEmpty(c.DefaultValue)))
+        {
+            defaults[cp.Key] = cp.DefaultValue;
+        }
+
+        var inst = new MappingFunctoidInstance
+        {
+            Id = Guid.NewGuid(),
+            GridPageId = _activePage.Id,
+            FunctoidDefinitionId = def.Id,
+            FunctoidDefinition = def,
+            X = 195,
+            Y = Math.Max(36, 48 + _activePage.FunctoidInstances.Count * 88),
+            Comment = oldLink.Comment,
+            ConfigValues = defaults
+        };
+
+        var linkIn = new MappingLink
+        {
+            Id = Guid.NewGuid(),
+            GridPageId = _activePage.Id,
+            SourcePropertyPath = oldLink.SourcePropertyPath,
+            SourceFunctoidInstanceId = oldLink.SourceFunctoidInstanceId,
+            TargetFunctoidInstanceId = inst.Id,
+            TargetInputIndex = 0
+        };
+
+        var linkOut = new MappingLink
+        {
+            Id = Guid.NewGuid(),
+            GridPageId = _activePage.Id,
+            SourceFunctoidInstanceId = inst.Id,
+            TargetPropertyPath = oldLink.TargetPropertyPath,
+            TargetFunctoidInstanceId = oldLink.TargetFunctoidInstanceId,
+            TargetInputIndex = oldLink.TargetInputIndex
+        };
+
+        _activePage.Links.Remove(oldLink);
+        _activePage.FunctoidInstances.Add(inst);
+        _activePage.Links.Add(linkIn);
+        _activePage.Links.Add(linkOut);
+
+        SelectFunctoidInstance(inst);
+        await PersistAndRefreshAsync();
+    }
+
+    private async Task AutoArrangeFunctoidsAsync()
+    {
+        if (_activePage is null || _activePage.FunctoidInstances.Count == 0) return;
+
+        // Topological column layout so chained functoids flow cleanly left -> right
+        var colByInst = new Dictionary<Guid, int>();
+        int GetCol(Guid id, HashSet<Guid> vis)
+        {
+            if (colByInst.TryGetValue(id, out var c)) return c;
+            if (!vis.Add(id)) return 0;
+            var upstream = _activePage.Links
+                .Where(l => l.TargetFunctoidInstanceId == id && l.SourceFunctoidInstanceId.HasValue)
+                .Select(l => l.SourceFunctoidInstanceId!.Value)
+                .ToList();
+            int col = upstream.Count == 0 ? 0 : upstream.Max(u => GetCol(u, vis)) + 1;
+            colByInst[id] = col;
+            vis.Remove(id);
+            return col;
+        }
+
+        foreach (var f in _activePage.FunctoidInstances)
+        {
+            GetCol(f.Id, []);
+        }
+
+        foreach (var grp in _activePage.FunctoidInstances.GroupBy(f => colByInst.GetValueOrDefault(f.Id, 0)).OrderBy(g => g.Key))
+        {
+            double y = 32;
+            double x = 90 + grp.Key * 205;
+            foreach (var inst in grp.OrderBy(i => i.Y))
+            {
+                inst.X = x;
+                inst.Y = y;
+                y += 102;
+            }
+        }
+
+        await PersistAndRefreshAsync(revalidate: false);
+    }
+
+    private async Task OnSelectedLinkCommentChangedAsync(ChangeEventArgs e)
+    {
+        if (_selectedLink is null) return;
+        _selectedLink.Comment = e.Value?.ToString()?.Trim() ?? string.Empty;
+        await PersistAndRefreshAsync(revalidate: false);
+    }
+
+    private async Task OnSelectedFunctoidCommentChangedAsync(ChangeEventArgs e)
+    {
+        if (_selectedFunctoid is null) return;
+        _selectedFunctoid.Comment = e.Value?.ToString()?.Trim() ?? string.Empty;
+        await PersistAndRefreshAsync(revalidate: false);
+    }
+
+    private async Task OnFunctoidLabelChangedAsync(ChangeEventArgs e)
+    {
+        if (_selectedFunctoid is null) return;
+        var val = e.Value?.ToString()?.Trim();
+        _selectedFunctoid.LabelOverride = string.IsNullOrWhiteSpace(val) ? null : val;
+        await PersistAndRefreshAsync(revalidate: false);
+    }
+
+    private async Task OnFunctoidConfigChangedAsync(string key, string value)
+    {
+        if (_selectedFunctoid is null) return;
+        _selectedFunctoid.ConfigValues[key] = value;
+        await PersistAndRefreshAsync(revalidate: true);
+    }
+
+    private async Task DeleteSelectedLinkAsync()
+    {
+        if (_activePage is null || _selectedLink is null) return;
+        _activePage.Links.Remove(_selectedLink);
+        _selectedLink = null;
+        await PersistAndRefreshAsync();
+    }
+
+    private async Task DeleteSelectedFunctoidAsync()
+    {
+        if (_activePage is null || _selectedFunctoid is null) return;
+        var id = _selectedFunctoid.Id;
+        _activePage.Links.RemoveAll(l => l.SourceFunctoidInstanceId == id || l.TargetFunctoidInstanceId == id);
+        _activePage.FunctoidInstances.Remove(_selectedFunctoid);
+        _selectedFunctoid = null;
+        await PersistAndRefreshAsync();
+    }
+
+    // ==================== GRID PAGE MANAGEMENT ====================
+
+    private void SwitchGridPage(MappingGridPage page)
+    {
+        _activePage = page;
+        _renamingPage = false;
+        ClearSelections();
+    }
+
+    private async Task AddGridPageAsync()
+    {
+        if (_mapping is null) return;
+        var nextPage = new MappingGridPage
+        {
+            Id = Guid.NewGuid(),
+            MappingId = _mapping.Id,
+            Name = $"Page {_mapping.GridPages.Count + 1}",
+            SortOrder = _mapping.GridPages.Count
+        };
+        _mapping.GridPages.Add(nextPage);
+        _activePage = nextPage;
+        ClearSelections();
+        await PersistAndRefreshAsync();
+    }
+
+    private void StartRenamePage()
+    {
+        if (_activePage is null) return;
+        _renamePageBuffer = _activePage.Name;
+        _renamingPage = true;
+    }
+
+    private async Task CommitRenamePageAsync()
+    {
+        if (_activePage is null || string.IsNullOrWhiteSpace(_renamePageBuffer)) return;
+        _activePage.Name = _renamePageBuffer.Trim();
+        _renamingPage = false;
+        await PersistAndRefreshAsync(revalidate: true);
+    }
+
+    private async Task DeleteActivePageAsync()
+    {
+        if (_mapping is null || _activePage is null || _mapping.GridPages.Count <= 1) return;
+        _mapping.GridPages.Remove(_activePage);
+        _activePage = _mapping.GridPages.OrderBy(p => p.SortOrder).First();
+        ClearSelections();
+        await PersistAndRefreshAsync();
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        if (_mapping is null) return;
+        _typeCatalog.TryGetValue(_mapping.SourceTypeId, out _sourceType);
+        _typeCatalog.TryGetValue(_mapping.TargetTypeId, out _targetType);
+        _showSettingsModal = false;
+        RebuildTrees();
+        await PersistAndRefreshAsync();
+    }
+
+    private void OpenExportModal()
+    {
+        if (_mapping is null) return;
+        _exportedMarkdown = MappingSpecExporter.ExportMarkdown(_mapping, _typeCatalog, _functoidCatalog);
+        _copyBtnLabel = "Copy Markdown";
+        _showExportModal = true;
+    }
+
+    private async Task CopyMarkdownSpecAsync()
+    {
+        if (_jsModule is not null)
+        {
+            await _jsModule.InvokeAsync<bool>("copyToClipboard", _exportedMarkdown);
+            _copyBtnLabel = "✓ Copied!";
+        }
+    }
+
+    private void ToggleToolbox()
+    {
+        _showToolbox = !_showToolbox;
+    }
+
+    private void JumpToDiagnostic(ValidationDiagnostic diag)
+    {
+        if (_mapping is null) return;
+        if (diag.GridPageId is Guid pid)
+        {
+            var pg = _mapping.GridPages.FirstOrDefault(p => p.Id == pid);
+            if (pg is not null) _activePage = pg;
+        }
+
+        if (diag.LinkId is Guid lid && _activePage is not null)
+        {
+            var ln = _activePage.Links.FirstOrDefault(l => l.Id == lid);
+            if (ln is not null) SelectLink(ln);
+        }
+        else if (diag.FunctoidInstanceId is Guid fid && _activePage is not null)
+        {
+            var fn = _activePage.FunctoidInstances.FirstOrDefault(f => f.Id == fid);
+            if (fn is not null) SelectFunctoidInstance(fn);
+        }
+    }
+
+    // ==================== TREE EXPANSION & SELECTION HELPERS ====================
+
+    private void ToggleSourceExpand(MapperTreeNode node)
+    {
+        if (!_expandedSourcePaths.Remove(node.Path))
+        {
+            _expandedSourcePaths.Add(node.Path);
+        }
+        RebuildTrees();
+    }
+
+    private void ToggleTargetExpand(MapperTreeNode node)
+    {
+        if (!_expandedTargetPaths.Remove(node.Path))
+        {
+            _expandedTargetPaths.Add(node.Path);
+        }
+        RebuildTrees();
+    }
+
+    private void ExpandAllMappedSource(bool rebuild = true)
+    {
+        if (_mapping is null) return;
+        var allSrc = _mapping.GridPages.SelectMany(p => p.Links).Where(l => l.SourcePropertyPath != null).Select(l => l.SourcePropertyPath!);
+        foreach (var p in PropertyPathResolver.GetAncestorPathsToExpand(allSrc))
+        {
+            _expandedSourcePaths.Add(p);
+        }
+        if (rebuild) RebuildTrees();
+    }
+
+    private void ExpandAllMappedTarget(bool rebuild = true)
+    {
+        if (_mapping is null) return;
+        var allTgt = _mapping.GridPages.SelectMany(p => p.Links).Where(l => l.TargetPropertyPath != null).Select(l => l.TargetPropertyPath!);
+        foreach (var p in PropertyPathResolver.GetAncestorPathsToExpand(allTgt))
+        {
+            _expandedTargetPaths.Add(p);
+        }
+        if (rebuild) RebuildTrees();
+    }
+
+    private void RebuildTrees()
+    {
+        _sourceTree = _sourceType is null
+            ? []
+            : PropertyPathResolver.BuildTree(_sourceType, _typeCatalog, _expandedSourcePaths);
+
+        _targetTree = _targetType is null
+            ? []
+            : PropertyPathResolver.BuildTree(_targetType, _typeCatalog, _expandedTargetPaths);
+    }
+
+    private void Revalidate()
+    {
+        if (_mapping is null) return;
+        _report = MappingValidator.Validate(_mapping, _typeCatalog, _functoidCatalog);
+    }
+
+    private async Task PersistAndRefreshAsync(bool revalidate = true)
+    {
+        if (_mapping is null) return;
+        _saveStatusText = "Saving...";
+        StateHasChanged();
+
+        if (revalidate)
+        {
+            Revalidate();
+        }
+
+        await Catalog.SaveMappingGraphAsync(_mapping);
+        _saveStatusText = "✓ Saved";
+        StateHasChanged();
+    }
+
+    private void SelectLink(MappingLink link)
+    {
+        _selectedLink = link;
+        _selectedFunctoid = null;
+        _selectedPropertyNode = null;
+    }
+
+    private void SelectFunctoidInstance(MappingFunctoidInstance inst)
+    {
+        _selectedFunctoid = inst;
+        _selectedLink = null;
+        _selectedPropertyNode = null;
+    }
+
+    private void SelectPropertyNode(MapperTreeNode node, bool isSource)
+    {
+        _selectedPropertyNode = node;
+        _selectedPropertySide = isSource ? "source" : "target";
+        _selectedLink = null;
+        _selectedFunctoid = null;
+    }
+
+    private void ClearSelectionIfCanvasBackground()
+    {
+        ClearSelections();
+    }
+
+    private void ClearSelections()
+    {
+        _selectedLink = null;
+        _selectedFunctoid = null;
+        _selectedPropertyNode = null;
+    }
+
+    // ==================== PORT & WIRE HELPERS ====================
+
+    private MappingLink? ParseCandidateLink(string fromPortId, string toPortId)
+    {
+        if (_activePage is null) return null;
+
+        var link = new MappingLink
+        {
+            Id = Guid.NewGuid(),
+            GridPageId = _activePage.Id
+        };
+
+        if (fromPortId.StartsWith("src:", StringComparison.Ordinal))
+        {
+            link.SourcePropertyPath = fromPortId["src:".Length..];
+        }
+        else if (fromPortId.StartsWith("fn-out:", StringComparison.Ordinal) &&
+                 Guid.TryParse(fromPortId["fn-out:".Length..], out var sfId))
+        {
+            link.SourceFunctoidInstanceId = sfId;
+        }
+        else
+        {
+            return null;
+        }
+
+        if (toPortId.StartsWith("tgt:", StringComparison.Ordinal))
+        {
+            link.TargetPropertyPath = toPortId["tgt:".Length..];
+        }
+        else if (toPortId.StartsWith("fn-in:", StringComparison.Ordinal))
+        {
+            var rest = toPortId["fn-in:".Length..];
+            var parts = rest.Split(':');
+            if (parts.Length != 2 || !Guid.TryParse(parts[0], out var tfId) || !int.TryParse(parts[1], out var pinIdx))
+            {
+                return null;
+            }
+            if (link.SourceFunctoidInstanceId == tfId)
+            {
+                return null; // Reject self-loop on same functoid card
+            }
+            link.TargetFunctoidInstanceId = tfId;
+            link.TargetInputIndex = pinIdx;
+        }
+        else
+        {
+            return null;
+        }
+
+        return link;
+    }
+
+    private (string? PortId, bool RolledUp) ResolveSvgFromPort(MappingLink link, HashSet<string> visibleSrcPaths)
+    {
+        if (!string.IsNullOrWhiteSpace(link.SourcePropertyPath))
+        {
+            var (vis, rolled) = PropertyPathResolver.FindVisibleOrAncestorPath(link.SourcePropertyPath, visibleSrcPaths);
+            return vis is null ? (null, false) : ($"src:{vis}", rolled);
+        }
+        if (link.SourceFunctoidInstanceId is Guid fid)
+        {
+            return ($"fn-out:{fid}", false);
+        }
+        return (null, false);
+    }
+
+    private (string? PortId, bool RolledUp) ResolveSvgToPort(MappingLink link, HashSet<string> visibleTgtPaths)
+    {
+        if (!string.IsNullOrWhiteSpace(link.TargetPropertyPath))
+        {
+            var (vis, rolled) = PropertyPathResolver.FindVisibleOrAncestorPath(link.TargetPropertyPath, visibleTgtPaths);
+            return vis is null ? (null, false) : ($"tgt:{vis}", rolled);
+        }
+        if (link.TargetFunctoidInstanceId is Guid fid)
+        {
+            return ($"fn-in:{fid}:{link.TargetInputIndex ?? 0}", false);
+        }
+        return (null, false);
+    }
+
+    private List<FunctoidInputSpec> GetRenderedInputPins(MappingFunctoidInstance inst, FunctoidDefinition? def)
+    {
+        if (def is null) return [];
+        var list = def.Inputs.Select(i => i.Clone()).ToList();
+
+        if (def.IsVariadic && _activePage is not null)
+        {
+            var maxWired = _activePage.Links
+                .Where(l => l.TargetFunctoidInstanceId == inst.Id && l.TargetInputIndex.HasValue)
+                .Select(l => l.TargetInputIndex!.Value)
+                .DefaultIfEmpty(def.Inputs.Count - 1)
+                .Max();
+
+            int targetCount = Math.Max(def.Inputs.Count, maxWired + 2);
+            for (int idx = list.Count; idx < targetCount; idx++)
+            {
+                var extra = def.GetInputSpec(idx);
+                if (extra is not null) list.Add(extra);
+            }
+        }
+
+        return list;
+    }
+
+    private string GetSourcePortClass(string path)
+    {
+        if (_activePage is null) return string.Empty;
+        var links = _activePage.Links
+            .Where(l => l.SourcePropertyPath == path || (l.SourcePropertyPath?.StartsWith(path + "/", StringComparison.Ordinal) ?? false))
+            .ToList();
+        if (links.Count == 0) return string.Empty;
+
+        var maxSev = links.Max(l => _report.GetLinkSeverity(l.Id));
+        return maxSev switch
+        {
+            ValidationSeverity.Error => "connected-err",
+            ValidationSeverity.Warning => "connected-warn",
+            _ => "connected"
+        };
+    }
+
+    private string GetTargetPortClass(string path)
+    {
+        if (_activePage is null) return string.Empty;
+        var links = _activePage.Links
+            .Where(l => l.TargetPropertyPath == path || (l.TargetPropertyPath?.StartsWith(path + "/", StringComparison.Ordinal) ?? false))
+            .ToList();
+        if (links.Count == 0) return string.Empty;
+
+        var maxSev = links.Max(l => _report.GetLinkSeverity(l.Id));
+        return maxSev switch
+        {
+            ValidationSeverity.Error => "connected-err",
+            ValidationSeverity.Warning => "connected-warn",
+            _ => "connected"
+        };
+    }
+
+    private FunctoidDefinition? ResolveFunctoidDef(MappingFunctoidInstance inst) =>
+        inst.FunctoidDefinition ?? (_functoidCatalog.TryGetValue(inst.FunctoidDefinitionId, out var d) ? d : null);
+
+    private string DescribeLinkSource(MappingLink link)
+    {
+        if (!string.IsNullOrWhiteSpace(link.SourcePropertyPath))
+        {
+            var r = PropertyPathResolver.Resolve(_sourceType, link.SourcePropertyPath, _typeCatalog);
+            return r.IsValid ? $"{r.DisplayPath} ({r.Type.FormatBadge(_typeNames)})" : link.SourcePropertyPath;
+        }
+        if (link.SourceFunctoidInstanceId is Guid fid && _activePage is not null)
+        {
+            var inst = _activePage.FunctoidInstances.FirstOrDefault(f => f.Id == fid);
+            var def = inst is null ? null : ResolveFunctoidDef(inst);
+            return $"{def?.Name ?? "Functoid"}.out";
+        }
+        return "?";
+    }
+
+    private string DescribeLinkTarget(MappingLink link)
+    {
+        if (!string.IsNullOrWhiteSpace(link.TargetPropertyPath))
+        {
+            var r = PropertyPathResolver.Resolve(_targetType, link.TargetPropertyPath, _typeCatalog);
+            return r.IsValid ? $"{r.DisplayPath} ({r.Type.FormatBadge(_typeNames)})" : link.TargetPropertyPath;
+        }
+        if (link.TargetFunctoidInstanceId is Guid fid && _activePage is not null)
+        {
+            var inst = _activePage.FunctoidInstances.FirstOrDefault(f => f.Id == fid);
+            var def = inst is null ? null : ResolveFunctoidDef(inst);
+            var pin = def?.GetInputSpec(link.TargetInputIndex ?? 0);
+            return $"{def?.Name ?? "Functoid"}.{pin?.Name ?? $"in{(link.TargetInputIndex ?? 0) + 1}"}";
+        }
+        return "?";
+    }
+
+    private static string FormatConfigInlinePreview(MappingFunctoidInstance inst)
+    {
+        var nonEmpty = inst.ConfigValues.Where(kv => !string.IsNullOrWhiteSpace(kv.Value)).ToList();
+        if (nonEmpty.Count == 0) return string.Empty;
+        return string.Join(", ", nonEmpty.Select(kv => $"{kv.Key}: \"{kv.Value}\""));
+    }
+
+    private int GetRequiredCanvasHeight()
+    {
+        if (_activePage is null || _activePage.FunctoidInstances.Count == 0) return 780;
+        return (int)_activePage.FunctoidInstances.Max(f => f.Y) + 220;
+    }
+
+    private int CountAllComments() =>
+        _mapping is null
+            ? 0
+            : _mapping.GridPages.Sum(p =>
+                p.Links.Count(l => !string.IsNullOrWhiteSpace(l.Comment)) +
+                p.FunctoidInstances.Count(f => !string.IsNullOrWhiteSpace(f.Comment)));
+
+    private static List<MapperTreeNode> FilterVisibleNodes(List<MapperTreeNode> flat, string filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter)) return flat;
+        return flat.Where(n =>
+            n.DisplayPath.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+            n.TypeBadge.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_jsModule is not null)
+        {
+            try
+            {
+                await _jsModule.InvokeVoidAsync("disposeMapperStage", _stageElementId);
+                await _jsModule.DisposeAsync();
+            }
+            catch { }
+        }
+        _dotNetRef?.Dispose();
+    }
+}

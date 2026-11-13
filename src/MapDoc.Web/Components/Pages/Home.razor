@@ -1,0 +1,258 @@
+﻿@page "/"
+@using System.Text.Json
+@inject CatalogService Catalog
+@inject NavigationManager Nav
+
+<PageTitle>MapDoc — Data Transformation Studio</PageTitle>
+
+<div class="page-wrap">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; margin-bottom:22px;">
+        <div>
+            <h1 style="margin:0; font-size:22px; font-weight:700;">Data Transformation Documentation Studio</h1>
+            <p style="margin:5px 0 0; color:var(--text-secondary);">
+                Define schemas, wire properties and functoids on BizTalk-style grid pages, validate type compatibility, and export transformation specs.
+            </p>
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button type="button" class="btn" @onclick="() => _showBundleImport = true">Import Bundle (.json)</button>
+            <a href="/types" class="btn">Manage Types</a>
+            <a href="/mappings" class="btn btn-primary">Open Mappings →</a>
+        </div>
+    </div>
+
+    @if (_summary is not null)
+    {
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="stat-label">Defined Types</div>
+                <div class="stat-value">@_summary.TypeCount</div>
+                <div style="margin-top:6px; font-size:12px; color:var(--text-secondary);">
+                    Across @(_summary.Namespaces.Count == 0 ? 1 : _summary.Namespaces.Count) namespace(s)
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Transformations</div>
+                <div class="stat-value">@_summary.MappingCount</div>
+                <div style="margin-top:6px; font-size:12px; color:var(--text-secondary);">
+                    @_mappings.Sum(m => m.GridPages.Count) total grid page(s)
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Functoid Library</div>
+                <div class="stat-value">@(_summary.PresetFunctoidCount + _summary.CustomFunctoidCount)</div>
+                <div style="margin-top:6px; font-size:12px; color:var(--text-secondary);">
+                    @_summary.PresetFunctoidCount preset · @_summary.CustomFunctoidCount custom
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Catalog Health</div>
+                <div class="stat-value" style="color:@(_totalErrors > 0 ? "var(--err)" : _totalWarnings > 0 ? "var(--warn)" : "var(--ok)");">
+                    @(_totalErrors > 0 ? $"{_totalErrors} Err" : _totalWarnings > 0 ? $"{_totalWarnings} Warn" : "All Clean")
+                </div>
+                <div style="margin-top:6px; font-size:12px; color:var(--text-secondary);">
+                    @_totalErrors error(s), @_totalWarnings warning(s)
+                </div>
+            </div>
+        </div>
+    }
+
+    <div style="display:grid; grid-template-columns: 1.5fr 1fr; gap:18px; align-items:start;">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h2 style="margin:0; font-size:15.5px;">Transformations</h2>
+                <a href="/mappings" class="btn btn-xs">View All</a>
+            </div>
+
+            @if (_mappings.Count == 0)
+            {
+                <p style="color:var(--text-secondary); margin:0;">No mappings created yet. Head to <a href="/mappings">Mappings</a> to create your first transformation.</p>
+            }
+            else
+            {
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    @foreach (var m in _mappings)
+                    {
+                        var report = _reportsByMapping.GetValueOrDefault(m.Id);
+                        <div class="list-item" style="background:var(--bg-elevated); border-color:var(--border-subtle);" @onclick="@(() => Nav.NavigateTo($"/mappings/{m.Id}"))">
+                            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                                <div style="display:flex; align-items:center; gap:8px;">
+                                    @if (!string.IsNullOrWhiteSpace(m.Namespace))
+                                    {
+                                        <span class="pill pill-ns">@m.Namespace</span>
+                                    }
+                                    <strong style="font-size:13.5px;">@m.Name</strong>
+                                </div>
+
+                                @if (report is not null)
+                                {
+                                    @if (report.ErrorCount > 0)
+                                    {
+                                        <span class="status-pill status-err">@report.ErrorCount Error(s)</span>
+                                    }
+                                    else if (report.WarningCount > 0)
+                                    {
+                                        <span class="status-pill status-warn">@report.WarningCount Warning(s)</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="status-pill status-ok">Valid</span>
+                                    }
+                                }
+                            </div>
+
+                            <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-secondary); margin-top:2px;">
+                                <code style="color:var(--text-primary);">@(m.SourceType?.QualifiedName ?? "?")</code>
+                                <span>→</span>
+                                <code style="color:var(--text-primary);">@(m.TargetType?.QualifiedName ?? "?")</code>
+                                <span style="margin-left:auto;">@m.GridPages.Count page(s) · @m.GridPages.Sum(p => p.Links.Count) wire(s)</span>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h2 style="margin:0; font-size:15.5px;">Schema Catalog</h2>
+                <a href="/types" class="btn btn-xs">+ New / Import JSON</a>
+            </div>
+
+            <div style="display:flex; flex-direction:column; gap:6px; max-height:380px; overflow-y:auto;">
+                @foreach (var t in _types)
+                {
+                    <div class="list-item" @onclick="@(() => Nav.NavigateTo($"/types/{t.Id}"))">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div>
+                                @if (!string.IsNullOrWhiteSpace(t.Namespace))
+                                {
+                                    <span class="pill pill-ns" style="margin-right:6px;">@t.Namespace</span>
+                                }
+                                <strong>@t.Name</strong>
+                            </div>
+                            <span style="font-size:11.5px; color:var(--text-secondary);">@t.Properties.Count prop(s)</span>
+                        </div>
+                        @if (!string.IsNullOrWhiteSpace(t.Description))
+                        {
+                            <div style="font-size:11.5px; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                                @t.Description
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@if (_showBundleImport)
+{
+    <div class="modal-backdrop" @onclick="() => _showBundleImport = false">
+        <div class="modal-panel" @onclick:stopPropagation="true">
+            <div class="modal-header">
+                <span>Import Portable Catalog Bundle (.mapdoc.json)</span>
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _showBundleImport = false">✕</button>
+            </div>
+            <div class="modal-body">
+                <div>
+                    <label class="field-label">Upload .mapdoc.json file or paste bundle JSON below</label>
+                    <InputFile OnChange="OnBundleFileSelectedAsync" accept=".json" style="margin-bottom:8px;" />
+                    <textarea class="input mono" rows="10" placeholder='{"format":"MapDoc.CatalogBundle", ...}' @bind="_bundleJsonText"></textarea>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(_bundleMessage))
+                {
+                    <div style="padding:8px 10px; border-radius:6px; background:var(--bg-elevated); font-size:12.5px;">
+                        @_bundleMessage
+                    </div>
+                }
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" @onclick="() => _showBundleImport = false">Close</button>
+                <button type="button" class="btn btn-primary" @onclick="ImportBundleAsync">Import Bundle</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private DashboardSummary? _summary;
+    private List<TypeDefinition> _types = [];
+    private List<MappingDefinition> _mappings = [];
+    private Dictionary<Guid, MappingValidationReport> _reportsByMapping = [];
+    private int _totalErrors;
+    private int _totalWarnings;
+
+    private bool _showBundleImport;
+    private string _bundleJsonText = string.Empty;
+    private string? _bundleMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _summary = await Catalog.GetDashboardSummaryAsync();
+        _types = await Catalog.GetTypesAsync();
+        _mappings = await Catalog.GetMappingsAsync();
+        var typeDict = _types.ToDictionary(t => t.Id);
+        var fnDict = await Catalog.GetFunctoidCatalogDictionaryAsync();
+
+        _reportsByMapping.Clear();
+        _totalErrors = 0;
+        _totalWarnings = 0;
+
+        foreach (var m in _mappings)
+        {
+            var r = MappingValidator.Validate(m, typeDict, fnDict);
+            _reportsByMapping[m.Id] = r;
+            _totalErrors += r.ErrorCount;
+            _totalWarnings += r.WarningCount;
+        }
+    }
+
+    private async Task OnBundleFileSelectedAsync(InputFileChangeEventArgs e)
+    {
+        try
+        {
+            await using var stream = e.File.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
+            using var reader = new StreamReader(stream);
+            _bundleJsonText = await reader.ReadToEndAsync();
+            _bundleMessage = $"Loaded '{e.File.Name}' ({e.File.Size:N0} bytes). Click Import Bundle to merge into catalog.";
+        }
+        catch (Exception ex)
+        {
+            _bundleMessage = $"Failed to read file: {ex.Message}";
+        }
+    }
+
+    private async Task ImportBundleAsync()
+    {
+        try
+        {
+            var bundle = JsonSerializer.Deserialize<MapDocBundle>(_bundleJsonText, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            if (bundle is null)
+            {
+                _bundleMessage = "Could not parse bundle JSON.";
+                return;
+            }
+
+            var (addedTypes, addedFunctoids, addedMappings) = await Catalog.ImportBundleAsync(bundle);
+            _bundleMessage = $"Imported {addedTypes} type(s), {addedFunctoids} custom functoid(s), and {addedMappings} mapping(s).";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _bundleMessage = $"Import error: {ex.Message}";
+        }
+    }
+}

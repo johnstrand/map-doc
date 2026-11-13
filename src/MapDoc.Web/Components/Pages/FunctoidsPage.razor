@@ -1,0 +1,449 @@
+@page "/functoids"
+@inject CatalogService Catalog
+
+<PageTitle>Functoids — MapDoc</PageTitle>
+
+<div class="workbench-split">
+    <!-- LEFT LIST -->
+    <aside class="workbench-sidebar">
+        <div class="workbench-sidebar-header">
+            <button type="button" class="btn btn-primary btn-sm" @onclick="CreateNewCustomFunctoid">+ New Custom Functoid</button>
+            <input class="input input-sm" placeholder="Search functoids..." @bind="_search" @bind:event="oninput" />
+
+            <div style="display:flex; gap:4px; flex-wrap:wrap;">
+                <button type="button" class="btn btn-xs @(_selectedCategory is null ? "btn-primary" : "")" @onclick="() => _selectedCategory = null">All</button>
+                @foreach (var cat in Enum.GetValues<FunctoidCategory>())
+                {
+                    <button type="button" class="btn btn-xs @(_selectedCategory == cat ? "btn-primary" : "")" @onclick="() => _selectedCategory = cat">@cat</button>
+                }
+            </div>
+        </div>
+
+        <div class="workbench-list">
+            @foreach (var f in FilteredFunctoids)
+            {
+                <div class="list-item @(_selected?.Id == f.Id ? "selected" : "")" @onclick="() => SelectFunctoid(f)">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="fn-symbol-badge">@f.Symbol</span>
+                        <strong style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">@f.Name</strong>
+                        @if (f.IsPreset)
+                        {
+                            <span style="font-size:10px; color:var(--text-muted);">PRESET</span>
+                        }
+                        else
+                        {
+                            <span class="pill pill-ns">CUSTOM</span>
+                        }
+                    </div>
+                    <div style="font-size:11px; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                        @FormatSignatureSummary(f)
+                    </div>
+                </div>
+            }
+        </div>
+    </aside>
+
+    <!-- RIGHT DETAIL / DESIGNER -->
+    <section class="workbench-detail">
+        @if (_selected is null)
+        {
+            <div class="card" style="text-align:center; padding:48px 24px;">
+                <h2 style="margin:0 0 8px;">Functoid Library</h2>
+                <p style="color:var(--text-secondary); margin:0 0 18px;">
+                    Inspect built-in conversion, string, math, logical, generator, and collection functoids, or author reusable custom functoids with 0..N inputs and 1 output.
+                </p>
+                <button type="button" class="btn btn-primary" @onclick="CreateNewCustomFunctoid">+ Define Custom Functoid</button>
+            </div>
+        }
+        else if (_selected.IsPreset)
+        {
+            <div style="max-width:860px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <span class="fn-symbol-badge" style="font-size:14px; height:30px; min-width:40px;">@_selected.Symbol</span>
+                        <div>
+                            <h1 style="margin:0; font-size:20px;">@_selected.Name</h1>
+                            <span style="font-size:12px; color:var(--text-secondary);">Built-in Preset · Category: @_selected.Category</span>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm" @onclick="CloneAsCustom">Clone as Custom Functoid</button>
+                </div>
+
+                <div class="card" style="margin-bottom:16px;">
+                    <p style="margin:0 0 12px;">@_selected.Description</p>
+                    <div style="font-size:12.5px; color:var(--text-secondary);">
+                        <strong>Signature:</strong> <code>@FormatSignatureSummary(_selected)</code>
+                        @if (_selected.AggregatesRepeatingInput)
+                        {
+                            <span class="status-pill status-ok" style="margin-left:10px;">Aggregates Repeating Array (N → 1)</span>
+                        }
+                    </div>
+                </div>
+
+                <div class="card" style="margin-bottom:16px;">
+                    <h3 style="margin:0 0 10px; font-size:14px;">Inputs (@(_selected.Inputs.Count == 0 && !_selected.IsVariadic ? "0 — Generator" : _selected.IsVariadic ? $"{_selected.Inputs.Count}..N variadic" : _selected.Inputs.Count.ToString()))</h3>
+                    @if (_selected.Inputs.Count == 0 && !_selected.IsVariadic)
+                    {
+                        <div style="color:var(--text-secondary); font-size:12.5px;">This functoid takes 0 wired inputs and generates a value directly.</div>
+                    }
+                    else
+                    {
+                        @foreach (var inp in _selected.Inputs)
+                        {
+                            <div style="padding:7px 0; border-bottom:1px solid var(--border-subtle); display:flex; justify-content:space-between; gap:12px;">
+                                <div>
+                                    <code>#@(@inp.Index + 1) @inp.Name</code>
+                                    @if (inp.IsOptional)
+                                    {
+                                        <span class="tree-mod-flag" style="margin-left:6px;">optional</span>
+                                    }
+                                    <div style="font-size:12px; color:var(--text-secondary);">@inp.Description</div>
+                                </div>
+                                <code>@inp.TypeSpec.FormatDisplay(_typeNames)</code>
+                            </div>
+                        }
+                        @if (_selected.IsVariadic)
+                        {
+                            <div style="padding-top:8px; font-size:12px; color:var(--accent);">
+                                + Accepts additional variadic inputs (<code>@_selected.VariadicInputName...</code> : <code>@((_selected.VariadicInputType ?? PortTypeSpec.AnyScalar()).FormatDisplay(_typeNames))</code>)
+                            </div>
+                        }
+                    }
+                </div>
+
+                @if (_selected.ConfigParams.Count > 0)
+                {
+                    <div class="card">
+                        <h3 style="margin:0 0 10px; font-size:14px;">Instance Configuration Parameters</h3>
+                        @foreach (var cp in _selected.ConfigParams)
+                        {
+                            <div style="padding:6px 0; border-bottom:1px solid var(--border-subtle);">
+                                <strong>@cp.Label</strong> (<code>@cp.Key</code>) @(cp.IsRequired ? "*" : "")
+                                <div style="font-size:12px; color:var(--text-secondary);">@cp.Description</div>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+        else
+        {
+            <!-- CUSTOM FUNCTOID EDITOR -->
+            <div style="max-width:940px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                    <h1 style="margin:0; font-size:20px;">@(string.IsNullOrWhiteSpace(_selected.Name) ? "New Custom Functoid" : $"Custom Functoid: {_selected.Name}")</h1>
+                    <div style="display:flex; gap:8px;">
+                        @if (!_isNew)
+                        {
+                            <button type="button" class="btn btn-sm btn-danger" @onclick="DeleteSelectedCustomAsync">Delete</button>
+                        }
+                        <button type="button" class="btn btn-sm btn-primary" @onclick="SaveSelectedCustomAsync">Save Custom Functoid</button>
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(_banner))
+                {
+                    <div style="margin-bottom:14px; padding:9px 12px; border-radius:8px; background:@(_bannerIsError ? "var(--err-soft)" : "var(--ok-soft)"); color:@(_bannerIsError ? "var(--err)" : "var(--ok)"); font-weight:600;">
+                        @_banner
+                    </div>
+                }
+
+                <div class="card" style="margin-bottom:16px;">
+                    <div style="display:grid; grid-template-columns: 1.4fr 1fr 120px; gap:12px; margin-bottom:12px;">
+                        <div>
+                            <label class="field-label">Functoid Name *</label>
+                            <input class="input" placeholder="e.g. LookupTaxRate" @bind="_selected.Name" />
+                        </div>
+                        <div>
+                            <label class="field-label">Category</label>
+                            <select class="input" @bind="_selected.Category">
+                                @foreach (var cat in Enum.GetValues<FunctoidCategory>())
+                                {
+                                    <option value="@cat">@cat</option>
+                                }
+                            </select>
+                        </div>
+                        <div>
+                            <label class="field-label">Badge Symbol</label>
+                            <input class="input mono" maxlength="8" placeholder="fx" @bind="_selected.Symbol" />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="field-label">Description / Transformation Logic</label>
+                        <textarea class="input" rows="2" placeholder="Document what this custom functoid computes..." @bind="_selected.Description"></textarea>
+                    </div>
+                </div>
+
+                <!-- INPUTS (0..N) -->
+                <div class="card" style="margin-bottom:16px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <h3 style="margin:0; font-size:14.5px;">Input Pins (@_selected.Inputs.Count fixed @(_selected.IsVariadic ? "+ variadic" : ""))</h3>
+                        <button type="button" class="btn btn-xs btn-primary" @onclick="AddInputPin">+ Add Input Pin</button>
+                    </div>
+
+                    @if (_selected.Inputs.Count == 0)
+                    {
+                        <div style="font-size:12.5px; color:var(--text-secondary); margin-bottom:10px;">
+                            0 fixed inputs (acts as a 0-input value generator unless pins or variadic inputs are enabled).
+                        </div>
+                    }
+
+                    @for (int i = 0; i < _selected.Inputs.Count; i++)
+                    {
+                        var pinIdx = i;
+                        var pin = _selected.Inputs[pinIdx];
+                        <div class="prop-editor-card" @key="pinIdx">
+                            <div style="display:grid; grid-template-columns: 1fr 1.5fr auto auto; gap:10px; align-items:start;">
+                                <div>
+                                    <label class="field-label">Input #@(pinIdx + 1) Name</label>
+                                    <input class="input input-sm mono" @bind="pin.Name" />
+                                </div>
+                                <div>
+                                    <label class="field-label">Accepted Type</label>
+                                    <PortTypeSpecEditor Spec="pin.TypeSpec" AvailableTypes="_allTypes" OnChanged="StateHasChanged" />
+                                </div>
+                                <div style="padding-top:20px;">
+                                    <label style="display:inline-flex; align-items:center; gap:5px; font-size:12px;">
+                                        <input type="checkbox" @bind="pin.IsOptional" />
+                                        Optional
+                                    </label>
+                                </div>
+                                <div style="padding-top:18px;">
+                                    <button type="button" class="btn btn-xs btn-danger" @onclick="() => _selected.Inputs.RemoveAt(pinIdx)">✕</button>
+                                </div>
+                            </div>
+                            <input class="input input-sm" style="margin-top:6px;" placeholder="Parameter description..." @bind="pin.Description" />
+                        </div>
+                    }
+
+                    <div style="padding-top:8px; border-top:1px solid var(--border-subtle); display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+                        <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; cursor:pointer;">
+                            <input type="checkbox" @bind="_selected.IsVariadic" />
+                            <strong>Allow Variadic Additional Inputs (N+1...)</strong>
+                        </label>
+
+                        @if (_selected.IsVariadic)
+                        {
+                            <input class="input input-sm mono" style="width:130px;" placeholder="argName" @bind="_selected.VariadicInputName" />
+                            <PortTypeSpecEditor Spec="@EnsureVariadicSpec()" AvailableTypes="_allTypes" OnChanged="StateHasChanged" />
+                        }
+                    </div>
+                </div>
+
+                <!-- SINGLE OUTPUT -->
+                <div class="card" style="margin-bottom:16px;">
+                    <h3 style="margin:0 0 10px; font-size:14.5px;">Output (1 Output Port)</h3>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px; align-items:start;">
+                        <div>
+                            <label class="field-label">Output Type</label>
+                            <PortTypeSpecEditor Spec="_selected.OutputType" AvailableTypes="_allTypes" OnChanged="StateHasChanged" />
+                        </div>
+                        <div>
+                            <label class="field-label">Cardinality Behavior</label>
+                            <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; padding-top:6px; cursor:pointer;">
+                                <input type="checkbox" @bind="_selected.AggregatesRepeatingInput" />
+                                Aggregates repeating array items into a single output (resolves N → 1 warnings)
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- OPTIONAL CONFIG PARAMETERS -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <h3 style="margin:0; font-size:14.5px;">Literal Configuration Parameters (@_selected.ConfigParams.Count)</h3>
+                        <button type="button" class="btn btn-xs" @onclick="AddConfigParam">+ Add Config Field</button>
+                    </div>
+                    @for (int i = 0; i < _selected.ConfigParams.Count; i++)
+                    {
+                        var cIdx = i;
+                        var cfg = _selected.ConfigParams[cIdx];
+                        <div class="prop-editor-card" style="display:grid; grid-template-columns: 1fr 1fr 1fr auto auto; gap:8px; align-items:end;">
+                            <div>
+                                <label class="field-label">Key</label>
+                                <input class="input input-sm mono" placeholder="format" @bind="cfg.Key" />
+                            </div>
+                            <div>
+                                <label class="field-label">Label</label>
+                                <input class="input input-sm" placeholder="Format String" @bind="cfg.Label" />
+                            </div>
+                            <div>
+                                <label class="field-label">Default Value</label>
+                                <input class="input input-sm" @bind="cfg.DefaultValue" />
+                            </div>
+                            <label style="display:inline-flex; align-items:center; gap:4px; font-size:12px; padding-bottom:5px;">
+                                <input type="checkbox" @bind="cfg.IsRequired" /> Req
+                            </label>
+                            <button type="button" class="btn btn-xs btn-danger" @onclick="() => _selected.ConfigParams.RemoveAt(cIdx)">✕</button>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </section>
+</div>
+
+@code {
+    private List<FunctoidDefinition> _functoids = [];
+    private List<TypeDefinition> _allTypes = [];
+    private Dictionary<Guid, string> _typeNames = [];
+    private string _search = string.Empty;
+    private FunctoidCategory? _selectedCategory;
+
+    private FunctoidDefinition? _selected;
+    private bool _isNew;
+    private string? _banner;
+    private bool _bannerIsError;
+
+    private IEnumerable<FunctoidDefinition> FilteredFunctoids => _functoids.Where(f =>
+        (_selectedCategory is null || f.Category == _selectedCategory) &&
+        (string.IsNullOrWhiteSpace(_search) ||
+         f.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) ||
+         f.Description.Contains(_search, StringComparison.OrdinalIgnoreCase)));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+        _selected = _functoids.FirstOrDefault(f => !f.IsPreset) ?? _functoids.FirstOrDefault();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _functoids = await Catalog.GetFunctoidsAsync();
+        _allTypes = await Catalog.GetTypesAsync();
+        _typeNames = _allTypes.ToDictionary(t => t.Id, t => t.Name);
+    }
+
+    private void SelectFunctoid(FunctoidDefinition f)
+    {
+        _banner = null;
+        _isNew = false;
+        _selected = CloneFunctoid(f);
+    }
+
+    private void CreateNewCustomFunctoid()
+    {
+        _banner = null;
+        _isNew = true;
+        _selected = new FunctoidDefinition
+        {
+            Id = Guid.NewGuid(),
+            IsPreset = false,
+            Name = "CustomTransform",
+            Category = FunctoidCategory.Custom,
+            Symbol = "fx",
+            Inputs =
+            [
+                new FunctoidInputSpec { Index = 0, Name = "input", TypeSpec = PortTypeSpec.AnyScalar() }
+            ],
+            OutputType = PortTypeSpec.Of(TypeDescriptor.ScalarString())
+        };
+    }
+
+    private void CloneAsCustom()
+    {
+        if (_selected is null) return;
+        var clone = CloneFunctoid(_selected);
+        clone.Id = Guid.NewGuid();
+        clone.IsPreset = false;
+        clone.PresetKey = null;
+        clone.Name = $"{_selected.Name}Custom";
+        clone.Category = FunctoidCategory.Custom;
+        _selected = clone;
+        _isNew = true;
+        _banner = "Cloned preset into a new editable custom functoid draft.";
+        _bannerIsError = false;
+    }
+
+    private void AddInputPin()
+    {
+        if (_selected is null) return;
+        _selected.Inputs.Add(new FunctoidInputSpec
+        {
+            Index = _selected.Inputs.Count,
+            Name = $"param{_selected.Inputs.Count + 1}",
+            TypeSpec = PortTypeSpec.AnyScalar()
+        });
+    }
+
+    private void AddConfigParam()
+    {
+        if (_selected is null) return;
+        _selected.ConfigParams.Add(new FunctoidConfigParamSpec
+        {
+            Key = $"param{_selected.ConfigParams.Count + 1}",
+            Label = $"Parameter {_selected.ConfigParams.Count + 1}"
+        });
+    }
+
+    private PortTypeSpec EnsureVariadicSpec()
+    {
+        _selected!.VariadicInputType ??= PortTypeSpec.AnyScalar();
+        return _selected.VariadicInputType;
+    }
+
+    private async Task SaveSelectedCustomAsync()
+    {
+        if (_selected is null) return;
+        if (string.IsNullOrWhiteSpace(_selected.Name))
+        {
+            _banner = "Functoid Name is required.";
+            _bannerIsError = true;
+            return;
+        }
+
+        var saved = await Catalog.SaveCustomFunctoidAsync(_selected);
+        await ReloadAsync();
+        _selected = CloneFunctoid(saved);
+        _isNew = false;
+        _banner = $"Saved custom functoid '{saved.Name}'.";
+        _bannerIsError = false;
+    }
+
+    private async Task DeleteSelectedCustomAsync()
+    {
+        if (_selected is null || _isNew) return;
+        var (deleted, reasons) = await Catalog.DeleteCustomFunctoidAsync(_selected.Id);
+        if (!deleted)
+        {
+            _banner = "Cannot delete: " + string.Join(" ", reasons);
+            _bannerIsError = true;
+            return;
+        }
+
+        await ReloadAsync();
+        _selected = _functoids.FirstOrDefault();
+        _banner = null;
+    }
+
+    private string FormatSignatureSummary(FunctoidDefinition f)
+    {
+        var ins = f.Inputs.Select(i => $"{i.Name}: {i.TypeSpec.FormatDisplay(_typeNames)}").ToList();
+        if (f.IsVariadic)
+        {
+            ins.Add($"{f.VariadicInputName}...: {(f.VariadicInputType ?? PortTypeSpec.AnyScalar()).FormatDisplay(_typeNames)}");
+        }
+        return $"({string.Join(", ", ins)}) → {f.OutputType.FormatDisplay(_typeNames)}";
+    }
+
+    private static FunctoidDefinition CloneFunctoid(FunctoidDefinition src) => new()
+    {
+        Id = src.Id,
+        PresetKey = src.PresetKey,
+        IsPreset = src.IsPreset,
+        Name = src.Name,
+        Category = src.Category,
+        Symbol = src.Symbol,
+        Description = src.Description,
+        Inputs = src.Inputs.Select(i => i.Clone()).ToList(),
+        IsVariadic = src.IsVariadic,
+        VariadicInputName = src.VariadicInputName,
+        VariadicInputType = src.VariadicInputType?.Clone(),
+        OutputType = src.OutputType.Clone(),
+        OutputInference = src.OutputInference,
+        OutputInferencePinIndex = src.OutputInferencePinIndex,
+        AggregatesRepeatingInput = src.AggregatesRepeatingInput,
+        ConfigParams = src.ConfigParams.Select(c => c.Clone()).ToList()
+    };
+}

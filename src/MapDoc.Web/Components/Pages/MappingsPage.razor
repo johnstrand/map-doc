@@ -1,0 +1,235 @@
+@page "/mappings"
+@inject CatalogService Catalog
+@inject NavigationManager Nav
+
+<PageTitle>Mappings — MapDoc</PageTitle>
+
+<div class="page-wrap">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; flex-wrap:wrap;">
+        <div>
+            <h1 style="margin:0; font-size:21px;">Data Transformations</h1>
+            <p style="margin:4px 0 0; color:var(--text-secondary);">
+                Select a mapping to launch the BizTalk-style visual mapper, or create a new transformation between any two catalog types.
+            </p>
+        </div>
+
+        <button type="button" class="btn btn-primary" @onclick="OpenNewMappingModal">+ New Mapping</button>
+    </div>
+
+    <div style="display:flex; gap:10px; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
+        <input class="input input-sm" style="max-width:320px;" placeholder="Search mappings..." @bind="_search" @bind:event="oninput" />
+        @foreach (var ns in _namespaces)
+        {
+            <button type="button" class="btn btn-xs @(_selectedNs == ns ? "btn-primary" : "")" @onclick="() => _selectedNs = _selectedNs == ns ? string.Empty : ns">@ns</button>
+        }
+    </div>
+
+    @if (_mappings.Count == 0)
+    {
+        <div class="card" style="text-align:center; padding:48px;">
+            <h3 style="margin:0 0 8px;">No Mappings Yet</h3>
+            <p style="color:var(--text-secondary); margin:0 0 16px;">Create your first Source → Target transformation to begin documenting property mappings.</p>
+            <button type="button" class="btn btn-primary" @onclick="OpenNewMappingModal">+ Create Mapping</button>
+        </div>
+    }
+    else
+    {
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap:14px;">
+            @foreach (var m in FilteredMappings)
+            {
+                var report = _reports.GetValueOrDefault(m.Id);
+                <div class="card" style="display:flex; flex-direction:column; justify-content:space-between; gap:12px;">
+                    <div>
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+                            <div>
+                                @if (!string.IsNullOrWhiteSpace(m.Namespace))
+                                {
+                                    <span class="pill pill-ns" style="margin-bottom:4px;">@m.Namespace</span>
+                                }
+                                <h2 style="margin:2px 0 4px; font-size:16px;">
+                                    <a href="/mappings/@m.Id" style="color:var(--text-primary);">@m.Name</a>
+                                </h2>
+                            </div>
+
+                            @if (report is not null)
+                            {
+                                @if (report.ErrorCount > 0)
+                                {
+                                    <span class="status-pill status-err">@report.ErrorCount Err · @report.WarningCount Warn</span>
+                                }
+                                else if (report.WarningCount > 0)
+                                {
+                                    <span class="status-pill status-warn">@report.WarningCount Warning(s)</span>
+                                }
+                                else
+                                {
+                                    <span class="status-pill status-ok">Valid</span>
+                                }
+                            }
+                        </div>
+
+                        <div style="padding:8px 10px; border-radius:6px; background:var(--bg-elevated); display:flex; align-items:center; justify-content:space-between; gap:8px; margin:8px 0;">
+                            <code style="font-size:12px;">@(m.SourceType?.QualifiedName ?? "(missing)")</code>
+                            <span style="color:var(--accent); font-weight:700;">──▶</span>
+                            <code style="font-size:12px;">@(m.TargetType?.QualifiedName ?? "(missing)")</code>
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(m.Description))
+                        {
+                            <p style="margin:0; font-size:12.5px; color:var(--text-secondary);">@m.Description</p>
+                        }
+                    </div>
+
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding-top:10px; border-top:1px solid var(--border-subtle);">
+                        <span style="font-size:11.5px; color:var(--text-muted);">
+                            @m.GridPages.Count page(s) · @m.GridPages.Sum(p => p.FunctoidInstances.Count) functoid(s) · @m.GridPages.Sum(p => p.Links.Count) wire(s)
+                        </span>
+
+                        <div style="display:flex; gap:6px;">
+                            <a href="/api/export/mappings/@m.Id/markdown" target="_blank" class="btn btn-xs" title="Download Markdown Spec">.MD</a>
+                            <a href="/api/export/mappings/@m.Id/html" target="_blank" class="btn btn-xs" title="Open Printable HTML Spec">HTML</a>
+                            <button type="button" class="btn btn-xs btn-danger" @onclick="() => DeleteMappingAsync(m.Id)" title="Delete mapping">✕</button>
+                            <a href="/mappings/@m.Id" class="btn btn-xs btn-primary">Open Studio →</a>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@if (_showCreateModal)
+{
+    <div class="modal-backdrop" @onclick="() => _showCreateModal = false">
+        <div class="modal-panel" style="max-width:520px;" @onclick:stopPropagation="true">
+            <div class="modal-header">
+                <span>Create New Transformation Mapping</span>
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _showCreateModal = false">✕</button>
+            </div>
+            <div class="modal-body">
+                @if (_types.Count == 0)
+                {
+                    <div style="color:var(--warn);">You need at least one defined Type before creating a mapping. <a href="/types">Create a Type first →</a></div>
+                }
+                else
+                {
+                    <div>
+                        <label class="field-label">Mapping Name *</label>
+                        <input class="input" placeholder="e.g. Customer_To_BillingAccount" @bind="_newName" />
+                    </div>
+                    <div>
+                        <label class="field-label">Namespace / Domain</label>
+                        <input class="input" placeholder="e.g. OrderToCash" @bind="_newNamespace" />
+                    </div>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                        <div>
+                            <label class="field-label">Source Base Type *</label>
+                            <select class="input" @bind="_newSourceTypeId">
+                                @foreach (var t in _types)
+                                {
+                                    <option value="@t.Id">@t.QualifiedName</option>
+                                }
+                            </select>
+                        </div>
+                        <div>
+                            <label class="field-label">Target Base Type *</label>
+                            <select class="input" @bind="_newTargetTypeId">
+                                @foreach (var t in _types)
+                                {
+                                    <option value="@t.Id">@t.QualifiedName</option>
+                                }
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="field-label">Description</label>
+                        <textarea class="input" rows="2" placeholder="Purpose and integration context..." @bind="_newDescription"></textarea>
+                    </div>
+                }
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" @onclick="() => _showCreateModal = false">Cancel</button>
+                <button type="button" class="btn btn-primary" disabled="@(_types.Count == 0 || string.IsNullOrWhiteSpace(_newName))" @onclick="CreateMappingAsync">
+                    Create & Launch Studio
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<MappingDefinition> _mappings = [];
+    private List<TypeDefinition> _types = [];
+    private Dictionary<Guid, MappingValidationReport> _reports = [];
+    private List<string> _namespaces = [];
+    private string _search = string.Empty;
+    private string _selectedNs = string.Empty;
+
+    private bool _showCreateModal;
+    private string _newName = string.Empty;
+    private string _newNamespace = string.Empty;
+    private string _newDescription = string.Empty;
+    private Guid _newSourceTypeId;
+    private Guid _newTargetTypeId;
+
+    private IEnumerable<MappingDefinition> FilteredMappings => _mappings.Where(m =>
+        (string.IsNullOrEmpty(_selectedNs) || string.Equals(m.Namespace, _selectedNs, StringComparison.OrdinalIgnoreCase)) &&
+        (string.IsNullOrWhiteSpace(_search) ||
+         m.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) ||
+         m.Namespace.Contains(_search, StringComparison.OrdinalIgnoreCase) ||
+         (m.SourceType?.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) ?? false) ||
+         (m.TargetType?.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) ?? false)));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _types = await Catalog.GetTypesAsync();
+        _mappings = await Catalog.GetMappingsAsync();
+        var typeDict = _types.ToDictionary(t => t.Id);
+        var fnDict = await Catalog.GetFunctoidCatalogDictionaryAsync();
+
+        _reports.Clear();
+        foreach (var m in _mappings)
+        {
+            _reports[m.Id] = MappingValidator.Validate(m, typeDict, fnDict);
+        }
+
+        _namespaces = _mappings
+            .Where(m => !string.IsNullOrWhiteSpace(m.Namespace))
+            .Select(m => m.Namespace)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x)
+            .ToList();
+    }
+
+    private void OpenNewMappingModal()
+    {
+        _newName = "NewTransformation";
+        _newNamespace = _selectedNs;
+        _newDescription = string.Empty;
+        if (_types.Count > 0)
+        {
+            _newSourceTypeId = _types[0].Id;
+            _newTargetTypeId = _types.Count > 1 ? _types[1].Id : _types[0].Id;
+        }
+        _showCreateModal = true;
+    }
+
+    private async Task CreateMappingAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_newName) || _newSourceTypeId == Guid.Empty || _newTargetTypeId == Guid.Empty) return;
+        var created = await Catalog.CreateMappingAsync(_newName, _newNamespace, _newDescription, _newSourceTypeId, _newTargetTypeId);
+        _showCreateModal = false;
+        Nav.NavigateTo($"/mappings/{created.Id}");
+    }
+
+    private async Task DeleteMappingAsync(Guid id)
+    {
+        await Catalog.DeleteMappingAsync(id);
+        await LoadAsync();
+    }
+}

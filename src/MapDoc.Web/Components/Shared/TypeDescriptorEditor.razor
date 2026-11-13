@@ -1,0 +1,165 @@
+<div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <select class="input input-sm" style="width:120px;" value="@Descriptor.BaseKind" @onchange="OnBaseKindChanged">
+            <option value="@BaseTypeKind.String">string</option>
+            <option value="@BaseTypeKind.Boolean">boolean</option>
+            <option value="@BaseTypeKind.Number">number</option>
+            <option value="@BaseTypeKind.Array">array</option>
+            <option value="@BaseTypeKind.Object">object</option>
+        </select>
+
+        @if (Descriptor.BaseKind == BaseTypeKind.String)
+        {
+            <select class="input input-sm" style="width:138px;" value="@Descriptor.StringSubtype" @onchange="OnStringSubtypeChanged">
+                <option value="@StringSubtype.None">plain (no subtype)</option>
+                <option value="@StringSubtype.Uuid">uuid</option>
+                <option value="@StringSubtype.Date">date</option>
+                <option value="@StringSubtype.Time">time</option>
+                <option value="@StringSubtype.DateTime">datetime</option>
+                <option value="@StringSubtype.Duration">duration</option>
+                <option value="@StringSubtype.Uri">uri</option>
+                <option value="@StringSubtype.Email">email</option>
+                <option value="@StringSubtype.Base64">base64</option>
+                <option value="@StringSubtype.Custom">custom...</option>
+            </select>
+
+            @if (Descriptor.StringSubtype == StringSubtype.Custom)
+            {
+                <input class="input input-sm"
+                       style="width:130px;"
+                       placeholder="e.g. iso-alpha-3"
+                       value="@Descriptor.CustomSubtype"
+                       @onchange="OnCustomSubtypeChanged" />
+            }
+        }
+        else if (Descriptor.BaseKind == BaseTypeKind.Number)
+        {
+            <select class="input input-sm" style="width:138px;" value="@Descriptor.NumberSubtype" @onchange="OnNumberSubtypeChanged">
+                <option value="@NumberSubtype.None">generic number</option>
+                <option value="@NumberSubtype.Int32">int32</option>
+                <option value="@NumberSubtype.Int64">int64</option>
+                <option value="@NumberSubtype.Float">float (32-bit)</option>
+                <option value="@NumberSubtype.Double">double (64-bit)</option>
+                <option value="@NumberSubtype.Decimal">decimal</option>
+            </select>
+        }
+        else if (Descriptor.BaseKind == BaseTypeKind.Object)
+        {
+            <select class="input input-sm" style="min-width:190px; flex:1;" value="@(Descriptor.ObjectTypeId?.ToString() ?? "")" @onchange="OnObjectTypeChanged">
+                <option value="">(Untyped / Dynamic Object)</option>
+                @if (CurrentOwnerType is not null)
+                {
+                    <option value="@CurrentOwnerType.Id">@CurrentOwnerType.QualifiedName (self-referential ↻)</option>
+                }
+                @foreach (var t in AvailableTypes.Where(x => x.Id != CurrentOwnerType?.Id))
+                {
+                    <option value="@t.Id">@t.QualifiedName</option>
+                }
+            </select>
+
+            @if (OnQuickCreateType.HasDelegate)
+            {
+                <button type="button" class="btn btn-xs" @onclick="TriggerQuickCreateAsync" title="Quick-create a new catalog Type and link it here">
+                    + New Type
+                </button>
+            }
+        }
+    </div>
+
+    @if (Descriptor.BaseKind == BaseTypeKind.Array && Depth < 5)
+    {
+        <div class="nested-descriptor-box">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+                <span style="font-size:11px; font-weight:700; color:var(--text-secondary);">ARRAY ELEMENT TYPE</span>
+                <label style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--text-secondary); cursor:pointer;">
+                    <input type="checkbox" checked="@Descriptor.ElementIsNullable" @onchange="OnElementNullableChanged" />
+                    Nullable items
+                </label>
+            </div>
+            <TypeDescriptorEditor Descriptor="@EnsureElementType()"
+                                  AvailableTypes="AvailableTypes"
+                                  CurrentOwnerType="CurrentOwnerType"
+                                  Depth="@(Depth + 1)"
+                                  OnChanged="NotifyChangedAsync"
+                                  OnQuickCreateType="OnQuickCreateType" />
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public TypeDescriptor Descriptor { get; set; } = default!;
+    [Parameter] public IReadOnlyList<TypeDefinition> AvailableTypes { get; set; } = [];
+    [Parameter] public TypeDefinition? CurrentOwnerType { get; set; }
+    [Parameter] public int Depth { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+    [Parameter] public EventCallback<TypeDescriptor> OnQuickCreateType { get; set; }
+
+    private TypeDescriptor EnsureElementType()
+    {
+        Descriptor.ElementType ??= TypeDescriptor.ScalarString();
+        return Descriptor.ElementType;
+    }
+
+    private async Task OnBaseKindChanged(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<BaseTypeKind>(e.Value?.ToString(), out var kind))
+        {
+            Descriptor.BaseKind = kind;
+            if (kind == BaseTypeKind.Array && Descriptor.ElementType is null)
+            {
+                Descriptor.ElementType = TypeDescriptor.ScalarString();
+            }
+            if (kind != BaseTypeKind.Array)
+            {
+                Descriptor.ElementType = null;
+                Descriptor.ElementIsNullable = false;
+            }
+            if (kind != BaseTypeKind.Object)
+            {
+                Descriptor.ObjectTypeId = null;
+            }
+            await NotifyChangedAsync();
+        }
+    }
+
+    private async Task OnStringSubtypeChanged(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<StringSubtype>(e.Value?.ToString(), out var sub))
+        {
+            Descriptor.StringSubtype = sub;
+            await NotifyChangedAsync();
+        }
+    }
+
+    private async Task OnCustomSubtypeChanged(ChangeEventArgs e)
+    {
+        Descriptor.CustomSubtype = e.Value?.ToString()?.Trim();
+        await NotifyChangedAsync();
+    }
+
+    private async Task OnNumberSubtypeChanged(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<NumberSubtype>(e.Value?.ToString(), out var sub))
+        {
+            Descriptor.NumberSubtype = sub;
+            await NotifyChangedAsync();
+        }
+    }
+
+    private async Task OnObjectTypeChanged(ChangeEventArgs e)
+    {
+        var raw = e.Value?.ToString();
+        Descriptor.ObjectTypeId = Guid.TryParse(raw, out var id) ? id : null;
+        await NotifyChangedAsync();
+    }
+
+    private async Task OnElementNullableChanged(ChangeEventArgs e)
+    {
+        Descriptor.ElementIsNullable = e.Value is bool b && b;
+        await NotifyChangedAsync();
+    }
+
+    private Task TriggerQuickCreateAsync() => OnQuickCreateType.InvokeAsync(Descriptor);
+
+    private Task NotifyChangedAsync() => OnChanged.InvokeAsync();
+}

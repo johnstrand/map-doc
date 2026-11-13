@@ -1,0 +1,66 @@
+<div style="display:flex; flex-direction:column; gap:6px;">
+    <select class="input input-sm" style="max-width:210px;" value="@GetModeValue()" @onchange="OnModeChanged">
+        <option value="Any">Any type (wildcard)</option>
+        <option value="AnyScalar">Any scalar (string | bool | number)</option>
+        <option value="AnyArray">Any array (array&lt;any&gt;)</option>
+        <option value="AnyObject">Any object (object&lt;any&gt;)</option>
+        <option value="Specific">Specific type...</option>
+    </select>
+
+    @if (Spec.Wildcard == PortWildcardKind.None)
+    {
+        <TypeDescriptorEditor Descriptor="@EnsureSpecificType()"
+                              AvailableTypes="AvailableTypes"
+                              OnChanged="OnChanged" />
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public PortTypeSpec Spec { get; set; } = default!;
+    [Parameter] public IReadOnlyList<TypeDefinition> AvailableTypes { get; set; } = [];
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private string GetModeValue() => Spec.Wildcard switch
+    {
+        PortWildcardKind.Any => "Any",
+        PortWildcardKind.AnyScalar => "AnyScalar",
+        PortWildcardKind.AnyArray => "AnyArray",
+        PortWildcardKind.AnyObject => "AnyObject",
+        _ => "Specific"
+    };
+
+    private TypeDescriptor EnsureSpecificType()
+    {
+        Spec.SpecificType ??= TypeDescriptor.ScalarString();
+        return Spec.SpecificType;
+    }
+
+    private async Task OnModeChanged(ChangeEventArgs e)
+    {
+        var mode = e.Value?.ToString();
+        switch (mode)
+        {
+            case "Any":
+                Spec.Wildcard = PortWildcardKind.Any;
+                Spec.SpecificType = null;
+                break;
+            case "AnyScalar":
+                Spec.Wildcard = PortWildcardKind.AnyScalar;
+                Spec.SpecificType = null;
+                break;
+            case "AnyArray":
+                Spec.Wildcard = PortWildcardKind.AnyArray;
+                Spec.SpecificType = null;
+                break;
+            case "AnyObject":
+                Spec.Wildcard = PortWildcardKind.AnyObject;
+                Spec.SpecificType = null;
+                break;
+            default:
+                Spec.Wildcard = PortWildcardKind.None;
+                Spec.SpecificType ??= TypeDescriptor.ScalarString();
+                break;
+        }
+        await OnChanged.InvokeAsync();
+    }
+}

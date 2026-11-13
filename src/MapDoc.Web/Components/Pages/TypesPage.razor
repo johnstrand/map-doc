@@ -1,0 +1,554 @@
+@page "/types"
+@page "/types/{TypeId:guid}"
+@inject CatalogService Catalog
+@inject NavigationManager Nav
+
+<PageTitle>Types — MapDoc</PageTitle>
+
+<div class="workbench-split">
+    <!-- LEFT SIDEBAR -->
+    <aside class="workbench-sidebar">
+        <div class="workbench-sidebar-header">
+            <div style="display:flex; gap:6px;">
+                <button type="button" class="btn btn-primary btn-sm" style="flex:1;" @onclick="CreateNewType">+ New Type</button>
+                <button type="button" class="btn btn-sm" @onclick="OpenImportModal" title="Infer Types from Sample JSON or JSON Schema">Import JSON</button>
+            </div>
+
+            <input class="input input-sm" placeholder="Search types, namespaces, tags..." @bind="_search" @bind:event="oninput" />
+
+            @if (_namespaces.Count > 0)
+            {
+                <div style="display:flex; gap:4px; flex-wrap:wrap;">
+                    <button type="button" class="btn btn-xs @(_selectedNamespace == "" ? "btn-primary" : "")" @onclick='() => _selectedNamespace = ""'>All</button>
+                    @foreach (var ns in _namespaces)
+                    {
+                        <button type="button" class="btn btn-xs @(_selectedNamespace == ns ? "btn-primary" : "")" @onclick="() => _selectedNamespace = ns">@ns</button>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="workbench-list">
+            @foreach (var t in FilteredTypes)
+            {
+                <div class="list-item @(_editingType?.Id == t.Id ? "selected" : "")" @onclick="() => SelectType(t)">
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
+                        <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                            @if (!string.IsNullOrWhiteSpace(t.Namespace))
+                            {
+                                <span class="pill pill-ns" style="margin-right:5px;">@t.Namespace</span>
+                            }
+                            <strong>@t.Name</strong>
+                        </div>
+                        <span style="font-size:11px; color:var(--text-muted);">@t.Properties.Count</span>
+                    </div>
+                    @if (!string.IsNullOrWhiteSpace(t.Description))
+                    {
+                        <div style="font-size:11.5px; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                            @t.Description
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </aside>
+
+    <!-- RIGHT EDITOR -->
+    <section class="workbench-detail">
+        @if (_editingType is null)
+        {
+            <div class="card" style="text-align:center; padding:48px 24px;">
+                <h2 style="margin:0 0 8px;">Select or Create a Type</h2>
+                <p style="color:var(--text-secondary); margin:0 0 18px;">
+                    Define scalar properties with rich subtypes, nested arrays, and complex or self-referential object references.
+                </p>
+                <div style="display:flex; justify-content:center; gap:10px;">
+                    <button type="button" class="btn btn-primary" @onclick="CreateNewType">+ Create Type</button>
+                    <button type="button" class="btn" @onclick="OpenImportModal">Import from JSON / Schema</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div style="max-width:1020px;">
+                <!-- Header Actions -->
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <h1 style="margin:0; font-size:20px;">@(string.IsNullOrWhiteSpace(_editingType.Name) ? "Untitled Type" : _editingType.QualifiedName)</h1>
+                        @if (_isNew)
+                        {
+                            <span class="pill pill-ns">unsaved draft</span>
+                        }
+                    </div>
+
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-sm" @onclick="() => _showSchemaPreview = !_showSchemaPreview">
+                            @(_showSchemaPreview ? "Hide JSON Schema" : "JSON Schema Preview")
+                        </button>
+                        @if (!_isNew)
+                        {
+                            <button type="button" class="btn btn-sm btn-danger" @onclick="DeleteCurrentTypeAsync">Delete Type</button>
+                        }
+                        <button type="button" class="btn btn-sm btn-primary" @onclick="SaveCurrentTypeAsync">Save Type</button>
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(_statusBanner))
+                {
+                    <div style="margin-bottom:14px; padding:9px 12px; border-radius:8px; background:@(_isErrorBanner ? "var(--err-soft)" : "var(--ok-soft)"); color:@(_isErrorBanner ? "var(--err)" : "var(--ok)"); font-weight:600; font-size:12.5px;">
+                        @_statusBanner
+                    </div>
+                }
+
+                <!-- Metadata Card -->
+                <div class="card" style="margin-bottom:16px;">
+                    <div style="display:grid; grid-template-columns: 1.3fr 1fr 1fr; gap:12px; margin-bottom:12px;">
+                        <div>
+                            <label class="field-label">Type Name *</label>
+                            <input class="input" placeholder="e.g. SalesOrder" @bind="_editingType.Name" @bind:event="oninput" />
+                        </div>
+                        <div>
+                            <label class="field-label">Namespace / Domain</label>
+                            <input class="input" placeholder="e.g. CRM, ERP, Billing" @bind="_editingType.Namespace" />
+                        </div>
+                        <div>
+                            <label class="field-label">Tags</label>
+                            <input class="input" placeholder="comma,separated,tags" @bind="_editingType.Tags" />
+                        </div>
+                    </div>
+                    <div>
+                        <label class="field-label">Description</label>
+                        <textarea class="input" rows="2" placeholder="Document what this data structure represents..." @bind="_editingType.Description"></textarea>
+                    </div>
+                </div>
+
+                @if (_showSchemaPreview)
+                {
+                    <div class="card" style="margin-bottom:16px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <strong style="font-size:12.5px;">Generated JSON Schema (Draft 2020-12)</strong>
+                            <span style="font-size:11.5px; color:var(--text-secondary);">Live preview</span>
+                        </div>
+                        <pre class="mono" style="margin:0; padding:10px; border-radius:6px; background:var(--bg-app); border:1px solid var(--border-subtle); max-height:260px; overflow:auto; font-size:12px;">@BuildSchemaPreview()</pre>
+                    </div>
+                }
+
+                <!-- Properties Section -->
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <h2 style="margin:0; font-size:15px;">Properties (@_editingType.Properties.Count)</h2>
+                    <button type="button" class="btn btn-sm btn-primary" @onclick="AddProperty">+ Add Property</button>
+                </div>
+
+                @if (_editingType.Properties.Count == 0)
+                {
+                    <div class="card" style="text-align:center; color:var(--text-secondary); padding:28px;">
+                        No properties yet. Click <strong>+ Add Property</strong> to define fields on this type.
+                    </div>
+                }
+                else
+                {
+                    @for (int i = 0; i < _editingType.Properties.Count; i++)
+                    {
+                        var idx = i;
+                        var prop = _editingType.Properties[idx];
+                        <div class="prop-editor-card" @key="prop.Id">
+                            <div class="prop-grid">
+                                <div>
+                                    <label class="field-label">Property Name</label>
+                                    <input class="input input-sm mono" placeholder="propertyName" @bind="prop.Name" />
+                                </div>
+
+                                <div>
+                                    <label class="field-label">Type & Subtype</label>
+                                    <TypeDescriptorEditor Descriptor="prop.Type"
+                                                          AvailableTypes="_allTypes"
+                                                          CurrentOwnerType="_editingType"
+                                                          OnChanged="StateHasChanged"
+                                                          OnQuickCreateType="OpenQuickCreateTypeModal" />
+                                </div>
+
+                                <div>
+                                    <label class="field-label">Modifiers</label>
+                                    <div style="display:flex; gap:10px; padding-top:5px;">
+                                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
+                                            <input type="checkbox" @bind="prop.IsNullable" />
+                                            Nullable
+                                        </label>
+                                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
+                                            <input type="checkbox" @bind="prop.IsOptional" />
+                                            Optional
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div style="display:flex; gap:4px; padding-top:18px;">
+                                    <button type="button" class="btn btn-xs" disabled="@(idx == 0)" @onclick="() => MoveProperty(idx, -1)" title="Move up">↑</button>
+                                    <button type="button" class="btn btn-xs" disabled="@(idx == _editingType.Properties.Count - 1)" @onclick="() => MoveProperty(idx, 1)" title="Move down">↓</button>
+                                    <button type="button" class="btn btn-xs btn-danger" @onclick="() => RemoveProperty(prop)" title="Remove property">✕</button>
+                                </div>
+                            </div>
+
+                            <div style="margin-top:8px;">
+                                <input class="input input-sm" placeholder="Property description / business rules..." @bind="prop.Description" />
+                            </div>
+                        </div>
+                    }
+
+                    <div style="display:flex; justify-content:space-between; margin-top:12px;">
+                        <button type="button" class="btn btn-sm" @onclick="AddProperty">+ Add Another Property</button>
+                        <button type="button" class="btn btn-primary" @onclick="SaveCurrentTypeAsync">Save Type</button>
+                    </div>
+                }
+            </div>
+        }
+    </section>
+</div>
+
+<!-- QUICK-CREATE REFERENCED TYPE MODAL -->
+@if (_quickCreateTargetDescriptor is not null)
+{
+    <div class="modal-backdrop" @onclick="() => _quickCreateTargetDescriptor = null">
+        <div class="modal-panel" style="max-width:460px;" @onclick:stopPropagation="true">
+            <div class="modal-header">
+                <span>Quick-Create Referenced Type</span>
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _quickCreateTargetDescriptor = null">✕</button>
+            </div>
+            <div class="modal-body">
+                <div>
+                    <label class="field-label">New Type Name *</label>
+                    <input class="input" placeholder="e.g. ShippingAddress" @bind="_quickTypeName" />
+                </div>
+                <div>
+                    <label class="field-label">Namespace</label>
+                    <input class="input" @bind="_quickTypeNamespace" />
+                </div>
+                <div>
+                    <label class="field-label">Description</label>
+                    <input class="input" @bind="_quickTypeDescription" />
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" @onclick="() => _quickCreateTargetDescriptor = null">Cancel</button>
+                <button type="button" class="btn btn-primary" @onclick="ConfirmQuickCreateTypeAsync">Create & Reference</button>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- IMPORT JSON / JSON SCHEMA MODAL -->
+@if (_showImportModal)
+{
+    <div class="modal-backdrop" @onclick="() => _showImportModal = false">
+        <div class="modal-panel" style="max-width:760px;" @onclick:stopPropagation="true">
+            <div class="modal-header">
+                <span>Import Types from Sample JSON or JSON Schema</span>
+                <button type="button" class="btn btn-xs btn-ghost" @onclick="() => _showImportModal = false">✕</button>
+            </div>
+            <div class="modal-body">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    <div>
+                        <label class="field-label">Root Type Name *</label>
+                        <input class="input input-sm" placeholder="e.g. CustomerPayload" @bind="_importRootName" />
+                    </div>
+                    <div>
+                        <label class="field-label">Namespace</label>
+                        <input class="input input-sm" placeholder="e.g. Billing" @bind="_importNamespace" />
+                    </div>
+                </div>
+
+                <div>
+                    <label class="field-label">Paste Sample JSON Object/Array or JSON Schema</label>
+                    <textarea class="input mono" rows="9" placeholder='{ "orderId": "550e8400-e29b-41d4-a716-446655440000", "total": 99.50, "items": [{ "sku": "A1", "qty": 2 }] }' @bind="_importJsonText"></textarea>
+                </div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <button type="button" class="btn btn-sm" @onclick="PreviewJsonImport">Preview Inferred Types</button>
+                    @if (_importPreview is { Success: true })
+                    {
+                        <span class="status-pill status-ok">Detected @_importPreview.DetectedMode — @_importPreview.GeneratedTypes.Count type(s)</span>
+                    }
+                </div>
+
+                @if (_importPreview is { Success: false, ErrorMessage: not null })
+                {
+                    <div style="padding:8px 10px; border-radius:6px; background:var(--err-soft); color:var(--err); font-size:12.5px;">
+                        @_importPreview.ErrorMessage
+                    </div>
+                }
+                else if (_importPreview is { Success: true })
+                {
+                    <div style="max-height:200px; overflow-y:auto; border:1px solid var(--border-subtle); border-radius:6px; padding:8px; background:var(--bg-app);">
+                        @foreach (var gt in _importPreview.GeneratedTypes)
+                        {
+                            <div style="margin-bottom:8px;">
+                                <strong>@gt.QualifiedName</strong>
+                                <span style="color:var(--text-secondary); font-size:11.5px;">(@gt.Properties.Count properties)</span>
+                                <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">
+                                    @foreach (var gp in gt.Properties)
+                                    {
+                                        <span class="pill pill-@gp.Type.BaseKind">@gp.Name: @gp.Type.FormatBadge(_importPreview.GeneratedTypes.ToDictionary(x => x.Id, x => x.Name))</span>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" @onclick="() => _showImportModal = false">Cancel</button>
+                <button type="button" class="btn btn-primary" @onclick="CommitJsonImportAsync">Import into Catalog</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid? TypeId { get; set; }
+
+    private List<TypeDefinition> _allTypes = [];
+    private List<string> _namespaces = [];
+    private string _search = string.Empty;
+    private string _selectedNamespace = string.Empty;
+
+    private TypeDefinition? _editingType;
+    private bool _isNew;
+    private bool _showSchemaPreview;
+    private string? _statusBanner;
+    private bool _isErrorBanner;
+
+    // Quick-create modal state
+    private TypeDescriptor? _quickCreateTargetDescriptor;
+    private string _quickTypeName = string.Empty;
+    private string _quickTypeNamespace = string.Empty;
+    private string _quickTypeDescription = string.Empty;
+
+    // Import modal state
+    private bool _showImportModal;
+    private string _importRootName = "ImportedPayload";
+    private string _importNamespace = string.Empty;
+    private string _importJsonText = string.Empty;
+    private JsonImportResult? _importPreview;
+
+    private IEnumerable<TypeDefinition> FilteredTypes => _allTypes.Where(t =>
+        (string.IsNullOrEmpty(_selectedNamespace) || string.Equals(t.Namespace, _selectedNamespace, StringComparison.OrdinalIgnoreCase)) &&
+        (string.IsNullOrWhiteSpace(_search) ||
+         t.Name.Contains(_search, StringComparison.OrdinalIgnoreCase) ||
+         t.Namespace.Contains(_search, StringComparison.OrdinalIgnoreCase) ||
+         t.Tags.Contains(_search, StringComparison.OrdinalIgnoreCase)));
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await ReloadCatalogAsync();
+        if (TypeId.HasValue)
+        {
+            var found = _allTypes.FirstOrDefault(t => t.Id == TypeId.Value);
+            if (found is not null)
+            {
+                CloneForEditing(found, isNew: false);
+            }
+        }
+        else if (_editingType is null && _allTypes.Count > 0)
+        {
+            CloneForEditing(_allTypes[0], isNew: false);
+        }
+    }
+
+    private async Task ReloadCatalogAsync()
+    {
+        _allTypes = await Catalog.GetTypesAsync();
+        _namespaces = _allTypes
+            .Where(t => !string.IsNullOrWhiteSpace(t.Namespace))
+            .Select(t => t.Namespace)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s)
+            .ToList();
+    }
+
+    private void SelectType(TypeDefinition t)
+    {
+        _statusBanner = null;
+        Nav.NavigateTo($"/types/{t.Id}");
+    }
+
+    private void CloneForEditing(TypeDefinition source, bool isNew)
+    {
+        _isNew = isNew;
+        _editingType = new TypeDefinition
+        {
+            Id = source.Id,
+            Name = source.Name,
+            Namespace = source.Namespace,
+            Tags = source.Tags,
+            Description = source.Description,
+            Properties = source.Properties.Select(p => new PropertyDefinition
+            {
+                Id = p.Id,
+                OwnerTypeId = source.Id,
+                Name = p.Name,
+                Description = p.Description,
+                Type = p.Type.Clone(),
+                IsNullable = p.IsNullable,
+                IsOptional = p.IsOptional,
+                SortOrder = p.SortOrder
+            }).ToList()
+        };
+    }
+
+    private void CreateNewType()
+    {
+        _statusBanner = null;
+        var draft = new TypeDefinition
+        {
+            Id = Guid.NewGuid(),
+            Name = "NewType",
+            Namespace = _selectedNamespace,
+            Properties =
+            [
+                new PropertyDefinition
+                {
+                    Id = Guid.NewGuid(),
+                    Name = "id",
+                    Type = TypeDescriptor.ScalarString(StringSubtype.Uuid),
+                    SortOrder = 0
+                }
+            ]
+        };
+        CloneForEditing(draft, isNew: true);
+    }
+
+    private void AddProperty()
+    {
+        if (_editingType is null) return;
+        _editingType.Properties.Add(new PropertyDefinition
+        {
+            Id = Guid.NewGuid(),
+            OwnerTypeId = _editingType.Id,
+            Name = $"property{_editingType.Properties.Count + 1}",
+            Type = TypeDescriptor.ScalarString(),
+            SortOrder = _editingType.Properties.Count
+        });
+    }
+
+    private void MoveProperty(int index, int delta)
+    {
+        if (_editingType is null) return;
+        var target = index + delta;
+        if (target < 0 || target >= _editingType.Properties.Count) return;
+        (_editingType.Properties[index], _editingType.Properties[target]) = (_editingType.Properties[target], _editingType.Properties[index]);
+    }
+
+    private void RemoveProperty(PropertyDefinition prop)
+    {
+        _editingType?.Properties.Remove(prop);
+    }
+
+    private async Task SaveCurrentTypeAsync()
+    {
+        if (_editingType is null) return;
+        if (string.IsNullOrWhiteSpace(_editingType.Name))
+        {
+            _isErrorBanner = true;
+            _statusBanner = "Type Name is required.";
+            return;
+        }
+
+        if (_editingType.Properties.Any(p => string.IsNullOrWhiteSpace(p.Name)))
+        {
+            _isErrorBanner = true;
+            _statusBanner = "Every property must have a non-empty name.";
+            return;
+        }
+
+        var saved = await Catalog.SaveTypeAsync(_editingType);
+        await ReloadCatalogAsync();
+        CloneForEditing(saved, isNew: false);
+        _isErrorBanner = false;
+        _statusBanner = $"Saved '{saved.QualifiedName}' ({saved.Properties.Count} properties).";
+        Nav.NavigateTo($"/types/{saved.Id}", replace: true);
+    }
+
+    private async Task DeleteCurrentTypeAsync()
+    {
+        if (_editingType is null || _isNew) return;
+        var (deleted, reasons) = await Catalog.DeleteTypeAsync(_editingType.Id);
+        if (!deleted)
+        {
+            _isErrorBanner = true;
+            _statusBanner = "Cannot delete type: " + string.Join(" ", reasons);
+            return;
+        }
+
+        _editingType = null;
+        _statusBanner = null;
+        await ReloadCatalogAsync();
+        Nav.NavigateTo("/types");
+    }
+
+    private void OpenQuickCreateTypeModal(TypeDescriptor targetDescriptor)
+    {
+        _quickCreateTargetDescriptor = targetDescriptor;
+        _quickTypeName = string.Empty;
+        _quickTypeNamespace = _editingType?.Namespace ?? string.Empty;
+        _quickTypeDescription = string.Empty;
+    }
+
+    private async Task ConfirmQuickCreateTypeAsync()
+    {
+        if (_quickCreateTargetDescriptor is null || string.IsNullOrWhiteSpace(_quickTypeName)) return;
+        var created = await Catalog.SaveTypeAsync(new TypeDefinition
+        {
+            Id = Guid.NewGuid(),
+            Name = _quickTypeName.Trim(),
+            Namespace = _quickTypeNamespace.Trim(),
+            Description = _quickTypeDescription.Trim(),
+            Properties =
+            [
+                new PropertyDefinition
+                {
+                    Id = Guid.NewGuid(),
+                    Name = "id",
+                    Type = TypeDescriptor.ScalarString(StringSubtype.Uuid)
+                }
+            ]
+        });
+
+        await ReloadCatalogAsync();
+        _quickCreateTargetDescriptor.BaseKind = BaseTypeKind.Object;
+        _quickCreateTargetDescriptor.ObjectTypeId = created.Id;
+        _quickCreateTargetDescriptor = null;
+    }
+
+    private void OpenImportModal()
+    {
+        _importPreview = null;
+        _importNamespace = _selectedNamespace;
+        _showImportModal = true;
+    }
+
+    private void PreviewJsonImport()
+    {
+        _importPreview = JsonTypeImporter.ImportFromJsonOrSchema(_importJsonText, _importRootName, _importNamespace);
+    }
+
+    private async Task CommitJsonImportAsync()
+    {
+        _importPreview = JsonTypeImporter.ImportFromJsonOrSchema(_importJsonText, _importRootName, _importNamespace);
+        if (!_importPreview.Success || _importPreview.GeneratedTypes.Count == 0) return;
+
+        await Catalog.SaveImportedTypesAsync(_importPreview.GeneratedTypes);
+        await ReloadCatalogAsync();
+        var root = _importPreview.RootType!;
+        _showImportModal = false;
+        _isErrorBanner = false;
+        _statusBanner = $"Imported {_importPreview.GeneratedTypes.Count} type(s) via {_importPreview.DetectedMode}.";
+        Nav.NavigateTo($"/types/{root.Id}");
+    }
+
+    private string BuildSchemaPreview()
+    {
+        if (_editingType is null) return "{}";
+        var dict = _allTypes.ToDictionary(t => t.Id);
+        dict[_editingType.Id] = _editingType;
+        return MappingSpecExporter.GenerateJsonSchemaPreview(_editingType, dict);
+    }
+}
